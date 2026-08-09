@@ -1,0 +1,733 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="資産状況" />
+<title>資産状況</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #F3F0E8; font-family: 'Hiragino Sans','Yu Gothic',system-ui,sans-serif; color: #16324F; }
+  * { box-sizing: border-box; }
+  input, select, button { font-family: inherit; }
+  .tabular { font-variant-numeric: tabular-nums; font-family: ui-monospace, 'SF Mono', Menlo, monospace; }
+  .field-label { font-size: 11px; color: #7A7261; margin-bottom: 4px; }
+  .field { margin-bottom: 12px; }
+  .input { width: 100%; border: 1px solid #DAD4C4; border-radius: 8px; padding: 9px 10px; font-size: 14px; background: #fff; color: #16324F; }
+  .card { background: #FBF9F4; border: 1px solid #DAD4C4; border-radius: 14px; padding: 14px 14px 10px; margin-bottom: 14px; }
+  .badge { font-size: 10px; padding: 2px 8px; border-radius: 999px; color: #fff; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script>
+const CATEGORIES = ["現金", "株式", "債券", "コモディティ", "暗号資産", "投資信託", "その他"];
+const CURRENCY_PRESETS = ["円", "米ドル", "その他"];
+const SECTOR_PRESETS = ["IT", "ヘルスケア", "金融", "消費財", "消費安定", "資本財", "エネルギー", "素材", "不動産", "公益", "通信"];
+const CLASS_PRESETS = ["現金", "株式", "債券", "コモディティ", "暗号資産", "その他"];
+const TARGET_CLASSES = ["現金", "株式", "債券", "コモディティ", "暗号資産"];
+const DEFAULT_SECTOR_BY_CATEGORY = { 現金: "現金", 債券: "債券", コモディティ: "コモディティ", 暗号資産: "暗号資産", その他: "その他" };
+const DEFAULT_CLASS_BY_CATEGORY = { 現金: "現金", 株式: "株式", 投資信託: "株式", 債券: "債券", コモディティ: "コモディティ", 暗号資産: "暗号資産" };
+const CATEGORY_COLORS = { 現金: "#16324F", 株式: "#4A7FA6", 債券: "#6B4E9B", コモディティ: "#B8902E", 暗号資産: "#B5432E", 投資信託: "#3B7D6B", その他: "#8A8A8A" };
+const PALETTE = ["#16324F", "#B8902E", "#B5432E", "#3B7D6B", "#6B4E9B", "#4A7FA6", "#8C8360", "#A65E8C", "#5C7A3D", "#8A8A8A"];
+const DEFAULT_TARGETS = { 現金: 20, 株式: 45, 債券: 20, コモディティ: 8, 暗号資産: 7 };
+const CRASH_PRESETS = [10, 20, 30, 50, 80];
+const DEFAULT_FX_RATE = 163.8; // 2026年7月時点の参考レート（実際のレートで書き換えて使ってください）
+
+// 参考値：過去の暴落局面でのセクター別下落率の目安（ピーク→ボトム、実際の数値とは異なる場合があります）
+const CRASH_SCENARIOS = {
+  lehman: {
+    label: "リーマンショック（2008〜2009年）",
+    drawdowns: { 現金: 0, 債券: 3, IT: -43, ヘルスケア: -33, 金融: -77, 消費財: -54, 消費安定: -24, 資本財: -58, エネルギー: -53, 素材: -56, 不動産: -68, 公益: -32, 通信: -40, コモディティ: 25, 暗号資産: -70, その他: -45, 未分類: -45 },
+  },
+  dotcom: {
+    label: "ITバブル崩壊（2000〜2002年）",
+    drawdowns: { 現金: 0, 債券: 8, IT: -83, ヘルスケア: -24, 金融: -25, 消費財: -33, 消費安定: -10, 資本財: -42, エネルギー: -13, 素材: -22, 不動産: -15, 公益: -32, 通信: -77, コモディティ: 15, 暗号資産: -83, その他: -40, 未分類: -40 },
+  },
+};
+function computeHistoricalCrash(scenarioKey, totals) {
+  const scenario = CRASH_SCENARIOS[scenarioKey];
+  let afterTotal = 0;
+  const impacts = [];
+  Object.entries(totals.bySector).forEach(([name, value]) => {
+    const dd = scenario.drawdowns[name] != null ? scenario.drawdowns[name] : scenario.drawdowns["その他"];
+    const after = value * (1 + dd / 100);
+    afterTotal += after;
+    impacts.push({ name, value, dd, after, impact: value - after });
+  });
+  impacts.sort((a, b) => b.impact - a.impact);
+  return { afterTotal, impacts };
+}
+
+// 任意%シミュレーション用：現金以外は一律で同じ%動くのではなく、資産の性質に応じて逆方向・倍率をかけて試算する
+const CRASH_MULTIPLIER = { 現金: 0, 債券: -0.15, コモディティ: -0.5, 暗号資産: 1.5 };
+function computeCustomCrash(p, totals) {
+  let afterTotal = 0;
+  const impacts = [];
+  Object.entries(totals.bySector).forEach(([name, value]) => {
+    const mult = CRASH_MULTIPLIER[name] != null ? CRASH_MULTIPLIER[name] : 1;
+    let changePct = -mult * p;
+    changePct = Math.max(-95, changePct);
+    const after = value * (1 + changePct / 100);
+    afterTotal += after;
+    impacts.push({ name, value, changePct, after, impact: value - after });
+  });
+  impacts.sort((a, b) => b.impact - a.impact);
+  return { afterTotal, impacts };
+}
+
+// 参考値：代表的な指数・銘柄の業種構成の目安（実際の最新構成とは異なる場合があります）
+const SECTOR_AUTOFILL_RULES = [
+  { keywords: ["s&p500", "s&p 500", "米国株式(s&p500)"], sectors: [["IT",32],["金融",13],["ヘルスケア",11],["消費財",10],["通信",9],["資本財",8],["エネルギー",4],["公益",3],["素材",2],["不動産",2]] },
+  { keywords: ["vti"], sectors: [["IT",32],["金融",13],["ヘルスケア",11],["消費財",10],["資本財",9],["通信",9],["消費安定",5],["エネルギー",4],["不動産",3],["公益",2],["素材",2]] },
+  { keywords: ["ナスダック100", "nasdaq100", "nasdaq 100"], sectors: [["IT",50],["通信",18],["消費財",15],["ヘルスケア",7],["資本財",5],["その他",5]] },
+  { keywords: ["全世界株式", "オールカントリー", "オルカン", "acwi", "vt"], sectors: [["IT",28],["金融",15],["ヘルスケア",11],["消費財",10],["資本財",8],["通信",8],["素材",5],["エネルギー",4],["公益",3],["不動産",2],["その他",6]] },
+  { keywords: ["先進国株式", "コクサイ", "kokusai"], sectors: [["IT",30],["金融",14],["ヘルスケア",12],["消費財",10],["通信",8],["資本財",8],["エネルギー",4],["素材",3],["公益",3],["不動産",2],["その他",6]] },
+  { keywords: ["新興国株式", "エマージング", "emerging"], sectors: [["金融",24],["IT",20],["消費財",12],["通信",10],["エネルギー",8],["素材",8],["資本財",7],["ヘルスケア",3],["公益",1],["不動産",1],["その他",6]] },
+  { keywords: ["日経225", "topix", "日本株式"], sectors: [["資本財",20],["消費財",15],["IT",14],["金融",13],["素材",8],["ヘルスケア",7],["通信",6],["エネルギー",6],["公益",4],["不動産",4],["その他",3]] },
+  { keywords: ["vym", "楽天・vym", "楽天vym"], sectors: [["金融",21],["IT",18],["ヘルスケア",13],["資本財",13],["エネルギー",9],["消費安定",8],["消費財",7],["公益",6],["素材",3],["通信",3],["不動産",1]] },
+  { keywords: ["vig"], sectors: [["資本財",20],["ヘルスケア",17],["金融",15],["消費安定",13],["IT",12],["消費財",10],["素材",5],["エネルギー",4],["通信",2],["公益",1],["不動産",1]] },
+  { keywords: ["vgk"], sectors: [["金融",19],["資本財",16],["ヘルスケア",13],["消費財",11],["消費安定",10],["IT",8],["素材",7],["エネルギー",6],["通信",5],["公益",4],["不動産",1]] },
+  { keywords: ["spyd"], sectors: [["金融",20],["不動産",16],["公益",15],["消費安定",10],["エネルギー",9],["資本財",8],["素材",6],["ヘルスケア",5],["消費財",5],["通信",3],["IT",3]] },
+  { keywords: ["hdv"], sectors: [["エネルギー",22],["ヘルスケア",16],["消費安定",11],["通信",10],["金融",9],["資本財",9],["IT",8],["公益",7],["素材",4],["消費財",3],["不動産",1]] },
+  { keywords: ["gxdw"], sectors: [["IT",34],["資本財",24],["金融",17],["不動産",10],["素材",9],["消費財",4],["通信",2]] },
+  { keywords: ["vdc"], sectors: [["消費安定",100]] },
+  { keywords: ["vht"], sectors: [["ヘルスケア",100]] },
+  { keywords: ["schd"], sectors: [["金融",17],["消費安定",14],["ヘルスケア",13],["資本財",14],["エネルギー",9],["IT",9],["消費財",5],["通信",4],["素材",4],["公益",2],["不動産",1]] },
+  { keywords: ["1489"], sectors: [["金融",19],["資本財",17],["消費財",13],["素材",11],["エネルギー",9],["IT",8],["通信",6],["公益",6],["不動産",5],["ヘルスケア",4],["その他",2]] },
+  { keywords: ["1577"], sectors: [["金融",20],["資本財",18],["素材",12],["消費財",12],["エネルギー",8],["IT",8],["通信",6],["公益",6],["不動産",5],["ヘルスケア",3],["その他",2]] },
+  { keywords: ["連続増配"], sectors: [["消費財",18],["資本財",17],["金融",14],["素材",12],["IT",10],["ヘルスケア",8],["通信",6],["エネルギー",5],["公益",5],["不動産",3],["その他",2]] },
+  { keywords: ["日本厳選プレミアム", "厳選プレミアム株式オープン", "厳選プレ"], sectors: [["消費財",22],["資本財",18],["IT",16],["ヘルスケア",12],["素材",10],["金融",8],["通信",6],["消費安定",5],["その他",3]] },
+  { keywords: ["トヨタ"], sectors: [["消費財",100]] },
+  { keywords: ["ソニー"], sectors: [["IT",100]] },
+  { keywords: ["任天堂"], sectors: [["IT",100]] },
+  { keywords: ["ソフトバンクグループ"], sectors: [["IT",100]] },
+  { keywords: ["ntt", "日本電信電話"], sectors: [["通信",100]] },
+  { keywords: ["kddi"], sectors: [["通信",100]] },
+  { keywords: ["三菱ufj", "三井住友", "みずほ"], sectors: [["金融",100]] },
+  { keywords: ["apple", "アップル"], sectors: [["IT",100]] },
+  { keywords: ["microsoft", "マイクロソフト"], sectors: [["IT",100]] },
+  { keywords: ["nvidia", "エヌビディア"], sectors: [["IT",100]] },
+  { keywords: ["google", "alphabet", "アルファベット"], sectors: [["通信",100]] },
+  { keywords: ["meta", "フェイスブック"], sectors: [["通信",100]] },
+  { keywords: ["amazon", "アマゾン"], sectors: [["消費財",100]] },
+  { keywords: ["tesla", "テスラ"], sectors: [["消費財",100]] },
+];
+function matchesKeyword(text, keyword) {
+  const kw = keyword.toLowerCase();
+  if (/^[a-z0-9&]+$/.test(kw)) {
+    const escaped = kw.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp("(^|[^a-z0-9])" + escaped + "($|[^a-z0-9])");
+    return re.test(text);
+  }
+  return text.indexOf(kw) !== -1;
+}
+function guessSectors(name) {
+  const n = (name || "").toLowerCase();
+  if (!n) return null;
+  for (const rule of SECTOR_AUTOFILL_RULES) {
+    if (rule.keywords.some((k) => matchesKeyword(n, k))) {
+      return rule.sectors.map(([sn, w]) => ({ id: uid(), name: sn, weight: w }));
+    }
+  }
+  return null;
+}
+
+const uid = () => Math.random().toString(36).slice(2, 10);
+const yen = (n) => "¥" + new Intl.NumberFormat("ja-JP").format(Math.round(n || 0));
+const pct = (n) => (Math.round((n || 0) * 10) / 10).toFixed(1) + "%";
+const esc = (s) => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+function normalizeWeights(list, fallbackName) {
+  const clean = list.filter((s) => (s.name || "").trim() !== "");
+  const sum = clean.reduce((s, x) => s + Number(x.weight || 0), 0);
+  if (clean.length === 0 || sum <= 0) return [{ id: uid(), name: fallbackName, weight: 100 }];
+  return clean.map((s) => ({ ...s, weight: Math.round(((Number(s.weight) / sum) * 100) * 10) / 10 }));
+}
+function emptyForm() {
+  return { id: null, institution: "", name: "", category: "現金", currency: "円", currencyCustom: "", amountJPY: "",
+    sectors: [{ id: uid(), name: "", weight: 100 }] };
+}
+
+let state = { assets: [], targets: { ...DEFAULT_TARGETS }, history: [], tab: "assets", form: null, confirmDelete: null, crashPct: 20, historicalScenario: "lehman", fxRate: DEFAULT_FX_RATE, fxMove: 10, backupMsg: "" };
+
+function loadState() {
+  try { const a = localStorage.getItem("assets-v1"); if (a) state.assets = JSON.parse(a); } catch (e) {}
+  try { const s = localStorage.getItem("settings-v1"); if (s) { const p = JSON.parse(s); if (p.targets) state.targets = { ...DEFAULT_TARGETS, ...p.targets }; } } catch (e) {}
+  try { const h = localStorage.getItem("history-v1"); if (h) state.history = JSON.parse(h); } catch (e) {}
+}
+function persist() {
+  try { localStorage.setItem("assets-v1", JSON.stringify(state.assets)); } catch (e) {}
+  try { localStorage.setItem("settings-v1", JSON.stringify({ targets: state.targets })); } catch (e) {}
+  try { localStorage.setItem("history-v1", JSON.stringify(state.history)); } catch (e) {}
+}
+function recordSnapshot() {
+  const totals = computeTotals();
+  const today = new Date().toISOString().slice(0, 10);
+  const entry = { date: today, total: totals.total, byClass: totals.byClass };
+  const idx = state.history.findIndex((h) => h.date === today);
+  if (idx >= 0) state.history[idx] = entry; else state.history.push(entry);
+  state.history.sort((a, b) => a.date.localeCompare(b.date));
+  renderApp();
+}
+function removeSnapshot(date) { state.history = state.history.filter((h) => h.date !== date); renderApp(); }
+
+function computeTotals() {
+  const total = state.assets.reduce((s, a) => s + Number(a.amountJPY || 0), 0);
+  const byCategory = {}, byCurrency = {}, bySector = {}, byClass = {};
+  state.assets.forEach((a) => {
+    const amt = Number(a.amountJPY || 0);
+    byCategory[a.category] = (byCategory[a.category] || 0) + amt;
+    byCurrency[a.category === "暗号資産" ? "暗号資産" : a.currency] = (byCurrency[a.category === "暗号資産" ? "暗号資産" : a.currency] || 0) + amt;
+    const sectors = a.sectors && a.sectors.length ? a.sectors : [{ name: DEFAULT_SECTOR_BY_CATEGORY[a.category] || a.category, weight: 100 }];
+    sectors.forEach((s) => { bySector[s.name] = (bySector[s.name] || 0) + amt * (Number(s.weight || 0) / 100); });
+    const classes = a.classes && a.classes.length ? a.classes : [{ name: DEFAULT_CLASS_BY_CATEGORY[a.category] || "その他", weight: 100 }];
+    classes.forEach((c) => { byClass[c.name] = (byClass[c.name] || 0) + amt * (Number(c.weight || 0) / 100); });
+  });
+  return { total, byCategory, byCurrency, bySector, byClass };
+}
+function toChartData(map, total) {
+  return Object.entries(map).map(([name, value]) => ({ name, value, pct: total ? (value / total) * 100 : 0 })).sort((a, b) => b.value - a.value);
+}
+
+function donutSVG(data, colorFor, size, stroke) {
+  size = size || 176; stroke = stroke || 26;
+  const r = (size - stroke) / 2, c = 2 * Math.PI * r;
+  let offset = 0, segs = "";
+  if (data.length === 0 || data.every((d) => d.value === 0)) {
+    segs = `<circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="#E4DECC" stroke-width="${stroke}" />`;
+  } else {
+    data.forEach((d, i) => {
+      const frac = d.pct / 100, dash = frac * c;
+      segs += `<circle cx="${size/2}" cy="${size/2}" r="${r}" fill="none" stroke="${colorFor(d,i)}" stroke-width="${stroke}" stroke-dasharray="${dash} ${c-dash}" stroke-dashoffset="${-offset}" transform="rotate(-90 ${size/2} ${size/2})" />`;
+      offset += dash;
+    });
+  }
+  return `<svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">${segs}</svg>`;
+}
+
+function breakdownCardHTML(title, data, colorFor) {
+  const legend = data.map((d, i) => `
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:4px 2px;font-size:12px;">
+      <div style="display:flex;align-items:center;gap:6px;min-width:0;">
+        <span style="width:9px;height:9px;border-radius:50%;background:${colorFor(d,i)};flex-shrink:0;"></span>
+        <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(d.name)}</span>
+      </div>
+      <div class="tabular" style="display:flex;gap:8px;flex-shrink:0;">
+        <span style="color:#7A7261;">${yen(d.value)}</span>
+        <span style="font-weight:700;width:44px;text-align:right;">${pct(d.pct)}</span>
+      </div>
+    </div>`).join("");
+  return `<div class="card">
+    <div style="font-size:13px;font-weight:700;margin-bottom:8px;">${esc(title)}</div>
+    <div style="display:flex;justify-content:center;margin-bottom:6px;">${donutSVG(data, colorFor)}</div>
+    <div>${legend}</div>
+  </div>`;
+}
+
+function shortDate(d) { const p = d.split("-"); return p[1] + "/" + p[2]; }
+
+function trendChartSVG(history) {
+  const w = Math.max(320, history.length * 64);
+  const h = 190, padL = 14, padR = 14, padT = 16, padB = 26;
+  const values = history.map((p) => p.total);
+  const maxV = Math.max.apply(null, values);
+  const minV = Math.min(0, Math.min.apply(null, values));
+  const range = (maxV - minV) || 1;
+  const innerW = w - padL - padR, innerH = h - padT - padB;
+  const stepX = history.length > 1 ? innerW / (history.length - 1) : 0;
+  const xy = history.map((p, i) => ({ x: padL + stepX * i, y: padT + innerH - ((p.total - minV) / range) * innerH, p }));
+  const linePts = xy.map((d) => d.x + "," + d.y).join(" ");
+  const dots = xy.map((d) => `<circle cx="${d.x}" cy="${d.y}" r="4" fill="#16324F" />`).join("");
+  const labels = xy.map((d) => `<text x="${d.x}" y="${h - 6}" font-size="9" fill="#7A7261" text-anchor="middle">${esc(shortDate(d.p.date))}</text>`).join("");
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">
+    <polyline points="${linePts}" fill="none" stroke="#16324F" stroke-width="2.5" />
+    ${dots}${labels}
+  </svg>`;
+}
+
+function trendTabHTML(totals) {
+  const hasToday = state.history.some((h) => h.date === new Date().toISOString().slice(0, 10));
+  const recordBtn = `<button id="record-btn" style="width:100%;display:flex;align-items:center;justify-content:center;gap:6px;background:#16324F;color:#F3F0E8;border:none;border-radius:10px;padding:12px 0;font-size:14px;font-weight:600;margin-bottom:14px;">${hasToday ? "今日の記録を更新する" : "今日の資産を記録する"}（${yen(totals.total)}）</button>`;
+
+  if (state.history.length === 0) {
+    return recordBtn + `<div style="text-align:center;color:#7A7261;font-size:13px;padding:40px 10px;border:1px dashed #DAD4C4;border-radius:12px;">まだ記録がありません。定期的に記録すると、資産の推移がグラフで見られます。</div>`;
+  }
+
+  const asc = [...state.history].sort((a, b) => a.date.localeCompare(b.date));
+  const chart = asc.length >= 2
+    ? `<div class="card"><div style="font-size:13px;font-weight:700;margin-bottom:8px;">資産合計の推移</div><div style="overflow-x:auto;">${trendChartSVG(asc)}</div></div>`
+    : `<div class="card" style="text-align:center;color:#7A7261;font-size:12px;">記録が1件だけです。もう1件記録するとグラフが表示されます。</div>`;
+
+  const rows = [...asc].reverse().map((h, i, arr) => {
+    const idx = asc.findIndex((x) => x.date === h.date);
+    const prev = idx > 0 ? asc[idx - 1] : null;
+    const delta = prev ? h.total - prev.total : null;
+    const deltaHTML = delta == null
+      ? ""
+      : `<span class="tabular" style="margin-left:8px;font-weight:700;color:${delta >= 0 ? "#3B7D6B" : "#B5432E"};">${delta >= 0 ? "+" : ""}${yen(delta)}</span>`;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:8px 0;border-bottom:1px solid #EDE8DA;">
+      <span style="color:#16324F;font-weight:600;">${esc(h.date)}</span>
+      <span class="tabular" style="display:flex;align-items:center;">${yen(h.total)}${deltaHTML}</span>
+      <span data-delete-snapshot="${esc(h.date)}" style="margin-left:10px;color:#B5432E;cursor:pointer;">🗑</span>
+    </div>`;
+  }).join("");
+
+  return recordBtn + chart + `<div class="card"><div style="font-size:13px;font-weight:700;margin-bottom:6px;">記録一覧</div>${rows}</div>`;
+}
+
+function headerHTML(totals) {
+  return `<div style="background:#16324F;color:#F3F0E8;padding:22px 20px 26px;">
+    <div style="opacity:.75;font-size:12px;letter-spacing:2px;">ASSET STATUS</div>
+    <div style="font-size:22px;font-weight:700;margin-top:4px;">資産状況</div>
+    <div class="tabular" style="font-size:32px;font-weight:700;margin-top:10px;">${yen(totals.total)}</div>
+    <div style="font-size:12px;opacity:.7;margin-top:4px;">登録件数 ${state.assets.length}件</div>
+  </div>`;
+}
+
+function assetsTabHTML() {
+  const cards = state.assets.map((a) => {
+    const deleteArea = state.confirmDelete === a.id
+      ? `<span style="display:flex;gap:6px;align-items:center;">
+           <span data-confirm-delete="${a.id}" style="font-size:11px;color:#B5432E;font-weight:700;cursor:pointer;">削除</span>
+           <span data-cancel-delete="1" style="font-size:13px;color:#7A7261;cursor:pointer;">✕</span>
+         </span>`
+      : `<span data-delete="${a.id}" style="font-size:13px;color:#B5432E;cursor:pointer;">🗑</span>`;
+    return `<div class="card" style="padding:12px 14px;">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:11px;color:#7A7261;">${esc(a.institution)}</div>
+          <div style="font-size:15px;font-weight:600;margin-top:1px;">${esc(a.name)}</div>
+          <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap;">
+            <span class="badge" style="background:${CATEGORY_COLORS[a.category] || '#8A8A8A'};">${esc(a.category)}</span>
+            <span class="badge" style="background:#EDE8DA;color:#5C5648;">${esc(a.currency)}</span>
+          </div>
+        </div>
+        <div style="text-align:right;margin-left:8px;">
+          <div class="tabular" style="font-size:15px;font-weight:700;">${yen(a.amountJPY)}</div>
+          <div style="display:flex;gap:12px;margin-top:8px;justify-content:flex-end;">
+            <span data-edit="${a.id}" style="font-size:13px;color:#16324F;cursor:pointer;">✎</span>
+            ${deleteArea}
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+  const empty = `<div style="text-align:center;color:#7A7261;font-size:13px;padding:40px 10px;border:1px dashed #DAD4C4;border-radius:12px;">まだ資産が登録されていません。<br/>「資産を追加」から入力してください。</div>`;
+  const backupData = JSON.stringify({ assets: state.assets, targets: state.targets, history: state.history });
+  const backupCard = `<div class="card">
+    <div style="font-size:13px;font-weight:700;margin-bottom:6px;">データのバックアップ</div>
+    <div style="font-size:11px;color:#7A7261;margin-bottom:8px;">保存が消えてしまう場合の保険として、下のテキストをどこか（メモアプリ等）にコピーして保管しておけます。復元するときはここに貼り付けて「読み込む」を押してください。</div>
+    <textarea id="backup-text" style="width:100%;height:70px;font-size:10px;border:1px solid #DAD4C4;border-radius:8px;padding:8px;box-sizing:border-box;">${esc(backupData)}</textarea>
+    ${state.backupMsg ? `<div style="font-size:11px;color:${state.backupMsg.indexOf('失敗')!==-1||state.backupMsg.indexOf('できません')!==-1?'#B5432E':'#3B7D6B'};margin-top:6px;">${esc(state.backupMsg)}</div>` : ""}
+    <div style="display:flex;gap:8px;margin-top:8px;">
+      <button id="backup-copy" style="flex:1;font-size:12px;padding:8px 0;border-radius:8px;border:1px solid #DAD4C4;background:#fff;color:#16324F;">コピー</button>
+      <button id="backup-import" style="flex:1;font-size:12px;padding:8px 0;border-radius:8px;border:none;background:#16324F;color:#fff;">読み込む</button>
+    </div>
+  </div>`;
+  return `<button id="add-btn" style="width:100%;display:flex;align-items:center;justify-content:center;gap:6px;background:#16324F;color:#F3F0E8;border:none;border-radius:10px;padding:12px 0;font-size:14px;font-weight:600;margin-bottom:14px;">＋ 資産を追加</button>
+    ${state.assets.length === 0 ? empty : cards}
+    ${backupCard}`;
+}
+
+function breakdownTabHTML(totals) {
+  if (totals.total === 0) return `<div style="text-align:center;color:#7A7261;font-size:13px;padding:60px 10px;">資産を登録すると内訳が表示されます。</div>`;
+  const categoryData = toChartData(totals.byCategory, totals.total);
+  const currencyData = toChartData(totals.byCurrency, totals.total);
+  const sectorData = toChartData(totals.bySector, totals.total);
+  return breakdownCardHTML("資産区分の内訳", categoryData, (d) => CATEGORY_COLORS[d.name] || "#8A8A8A")
+    + breakdownCardHTML("通貨の内訳", currencyData, (d, i) => PALETTE[i % PALETTE.length])
+    + breakdownCardHTML("業種・セクターの内訳", sectorData, (d, i) => PALETTE[i % PALETTE.length]);
+}
+
+function targetsTabHTML(totals) {
+  const targetSum = TARGET_CLASSES.reduce((s, k) => s + Number(state.targets[k] || 0), 0);
+  const rows = TARGET_CLASSES.map((k) => {
+    const actual = totals.total ? ((totals.byClass[k] || 0) / totals.total) * 100 : 0;
+    const rawTarget = state.targets[k];
+    const target = Number(rawTarget) || 0;
+    const gap = actual - target;
+    const gapColor = Math.abs(gap) < 1 ? "#3B7D6B" : gap > 0 ? "#B5432E" : "#4A7FA6";
+    return `<div style="margin-bottom:16px;">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:4px;">
+        <span style="font-size:13px;font-weight:600;">${k}</span>
+        <span class="tabular" style="font-size:12px;color:#7A7261;">実績 ${pct(actual)} ／ 目標 ${pct(target)}
+          <span style="margin-left:6px;font-weight:700;color:${gapColor};">（${gap >= 0 ? "+" : ""}${pct(gap)}）</span>
+        </span>
+      </div>
+      <div style="position:relative;height:12px;background:#E4DECC;border-radius:6px;">
+        <div style="position:absolute;left:0;top:0;bottom:0;width:${Math.min(100,actual)}%;background:${CATEGORY_COLORS[k]};border-radius:6px;"></div>
+        <div style="position:absolute;left:${Math.min(100,target)}%;top:-3px;bottom:-3px;width:3px;background:#B8902E;border-radius:2px;"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;margin-top:6px;">
+        <span style="font-size:11px;color:#7A7261;">目標値</span>
+        <input id="target-input-${k}" type="number" min="0" max="100" value="${esc(rawTarget)}" class="tabular" style="width:56px;text-align:center;border:1px solid #DAD4C4;border-radius:6px;padding:3px 0;font-size:12px;" />
+        <span style="font-size:11px;color:#7A7261;">%</span>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="card" style="padding:16px 16px 8px;">
+    <div style="font-size:13px;font-weight:700;margin-bottom:2px;">理想の資産配分との差</div>
+    <div style="font-size:11px;color:#7A7261;margin-bottom:12px;">実績（バー）と目標（金色の線）を比較できます</div>
+    ${rows}
+    <div style="font-size:12px;text-align:right;color:${targetSum===100?'#3B7D6B':'#B5432E'};padding-bottom:6px;">
+      目標合計 ${pct(targetSum)}${targetSum !== 100 ? "（100%になるよう調整してください）" : ""}
+    </div>
+  </div>`;
+}
+
+function crashTabHTML(totals) {
+  const p = state.crashPct;
+  const custom = totals.total > 0 ? computeCustomCrash(p, totals) : { afterTotal: 0, impacts: [] };
+  const afterCrash = custom.afterTotal;
+  const diffAmount = afterCrash - totals.total;
+  const diffRatioOfTotal = totals.total ? (diffAmount / totals.total) * 100 : 0;
+  const presetBtns = CRASH_PRESETS.map((v) => `<button data-crash-preset="${v}" style="padding:6px 12px;border-radius:999px;font-size:12px;font-weight:700;border:1px solid #DAD4C4;background:${state.crashPct===v?'#16324F':'#fff'};color:${state.crashPct===v?'#F3F0E8':'#16324F'};">▲${v}%</button>`).join("");
+  const compareRows = CRASH_PRESETS.map((v) => {
+    const c = totals.total > 0 ? computeCustomCrash(v, totals) : { afterTotal: 0 };
+    const l = totals.total - c.afterTotal;
+    return `<div style="display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid #EDE8DA;">
+      <span style="font-weight:700;color:#16324F;">▲${v}%</span>
+      <span class="tabular" style="color:#7A7261;">資産合計 ${yen(c.afterTotal)}</span>
+      <span class="tabular" style="color:${l>=0?'#B5432E':'#3B7D6B'};">${l>=0?"-":"+"}${yen(Math.abs(l))}</span>
+    </div>`;
+  }).join("");
+  const customImpactRows = custom.impacts.filter((x) => x.value > 0).map((x) => `
+    <div style="display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px solid #EDE8DA;">
+      <span style="color:#16324F;">${esc(x.name)}</span>
+      <span class="tabular" style="color:#7A7261;">${x.changePct>=0?"+":""}${Math.round(x.changePct*10)/10}%</span>
+      <span class="tabular" style="color:${x.impact>=0?'#B5432E':'#3B7D6B'};">${x.impact>=0?"-":"+"}${yen(Math.abs(x.impact))}</span>
+    </div>`).join("");
+  const scenarioKey = state.historicalScenario || "lehman";
+  const hc = totals.total > 0 ? computeHistoricalCrash(scenarioKey, totals) : null;
+  const scenarioBtns = Object.keys(CRASH_SCENARIOS).map((key) => `<button data-scenario="${key}" style="flex:1;padding:8px 6px;border-radius:8px;font-size:12px;font-weight:700;border:1px solid #DAD4C4;background:${scenarioKey===key?'#16324F':'#fff'};color:${scenarioKey===key?'#F3F0E8':'#16324F'};">${CRASH_SCENARIOS[key].label}</button>`).join("");
+  const historicalCard = totals.total === 0
+    ? `<div class="card" style="text-align:center;color:#7A7261;font-size:12px;">資産を登録すると、保有比率をもとにした試算が見られます。</div>`
+    : (() => {
+        const diff = hc.afterTotal - totals.total;
+        const diffPct = totals.total ? (diff / totals.total) * 100 : 0;
+        const topImpacts = hc.impacts.filter((x) => x.value > 0).map((x) => `
+          <div style="display:flex;justify-content:space-between;font-size:12px;padding:5px 0;border-bottom:1px solid #EDE8DA;">
+            <span style="color:#16324F;">${esc(x.name)}</span>
+            <span class="tabular" style="color:#7A7261;">${x.dd>=0?"+":""}${x.dd}%</span>
+            <span class="tabular" style="color:${x.impact>=0?'#B5432E':'#3B7D6B'};">${x.impact>=0?"-":"+"}${yen(Math.abs(x.impact))}</span>
+          </div>`).join("");
+        return `<div class="card">
+          <div style="font-size:13px;font-weight:700;margin-bottom:2px;">過去の暴落を再現したら</div>
+          <div style="font-size:11px;color:#7A7261;margin-bottom:12px;">今の保有資産の業種・区分の構成比に、当時のセクター別下落率をあてはめて試算します</div>
+          <div style="display:flex;gap:6px;margin-bottom:14px;">${scenarioBtns}</div>
+          <div style="display:flex;justify-content:space-around;background:#F3F0E8;border-radius:10px;padding:10px 0;margin-bottom:12px;">
+            <div style="text-align:center;"><div style="font-size:11px;color:#7A7261;">試算後の資産合計</div><div class="tabular" style="font-size:16px;font-weight:700;color:#16324F;">${yen(hc.afterTotal)}</div></div>
+            <div style="text-align:center;"><div style="font-size:11px;color:#7A7261;">増減</div><div class="tabular" style="font-size:16px;font-weight:700;color:${diff>=0?'#3B7D6B':'#B5432E'};">${diff>=0?"+":""}${yen(diff)}（${diff>=0?"+":""}${pct(diffPct)}）</div></div>
+          </div>
+          <div style="font-size:11px;color:#7A7261;margin-bottom:4px;">影響が大きい内訳（上位）</div>
+          ${topImpacts}
+          <div style="font-size:10px;color:#B0A990;margin-top:10px;text-align:center;">※各セクターの下落率は過去の実際の値動きをもとにした概算で、保証や予測ではありません。暗号資産は当時存在しないため参考値です</div>
+        </div>`;
+      })();
+
+  return `<div class="card">
+    <div style="font-size:13px;font-weight:700;margin-bottom:2px;">暴落シミュレーション（任意の下落率）</div>
+    <div style="font-size:11px;color:#7A7261;margin-bottom:12px;">株式・投資信託などが指定した割合だけ下落した場合を試算します。現金は変動なし、債券とコモディティ（金など）はむしろ上がる、暗号資産はより大きく動く前提です</div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">${presetBtns}</div>
+    <input id="crash-range" type="range" min="1" max="95" value="${p}" style="width:100%;accent-color:#B5432E;" />
+    <div style="text-align:center;font-size:12px;color:#7A7261;margin-top:2px;margin-bottom:14px;">株式の下落率：<span class="tabular" style="font-weight:700;color:#B5432E;">▲${p}%</span></div>
+    <div style="margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#7A7261;margin-bottom:3px;"><span>現在</span><span class="tabular">${yen(totals.total)}</span></div>
+      <div style="height:14px;background:#E4DECC;border-radius:7px;"><div style="height:100%;width:100%;background:#16324F;border-radius:7px;"></div></div>
+    </div>
+    <div style="margin-bottom:14px;">
+      <div style="display:flex;justify-content:space-between;font-size:11px;color:#7A7261;margin-bottom:3px;"><span>暴落後</span><span class="tabular">${yen(afterCrash)}</span></div>
+      <div style="height:14px;background:#E4DECC;border-radius:7px;"><div style="height:100%;width:${totals.total ? Math.min(100,(afterCrash/totals.total)*100) : 0}%;background:#B5432E;border-radius:7px;"></div></div>
+    </div>
+    <div style="display:flex;justify-content:space-around;background:#F3F0E8;border-radius:10px;padding:10px 0;">
+      <div style="text-align:center;"><div style="font-size:11px;color:#7A7261;">増減額</div><div class="tabular" style="font-size:16px;font-weight:700;color:${diffAmount>=0?'#3B7D6B':'#B5432E'};">${diffAmount>=0?"+":""}${yen(diffAmount)}</div></div>
+      <div style="text-align:center;"><div style="font-size:11px;color:#7A7261;">資産全体の増減率</div><div class="tabular" style="font-size:16px;font-weight:700;color:${diffAmount>=0?'#3B7D6B':'#B5432E'};">${diffRatioOfTotal>=0?"+":""}${pct(diffRatioOfTotal)}</div></div>
+    </div>
+    ${customImpactRows ? `<div style="font-size:11px;color:#7A7261;margin-top:12px;margin-bottom:4px;">内訳ごとの増減</div>${customImpactRows}` : ""}
+    <div style="font-size:10px;color:#B0A990;margin-top:10px;text-align:center;">※将来の下落を予測・保証するものではなく、試算の目安です</div>
+  </div>
+  <div class="card">
+    <div style="font-size:13px;font-weight:700;margin-bottom:10px;">下落率ごとの比較</div>
+    ${compareRows}
+  </div>
+  ${historicalCard}`;
+}
+
+function fxTabHTML(totals) {
+  const usdTotal = totals.byCurrency["米ドル"] || 0;
+  const otherTotal = totals.total - usdTotal;
+  const rate = Number(state.fxRate) || 0;
+  const move = Number(state.fxMove) || 0;
+  const pctChange = rate ? move / rate : 0;
+  const newUsdJPY = usdTotal * (1 + pctChange);
+  const newTotal = otherTotal + newUsdJPY;
+  const diff = newTotal - totals.total;
+  const diffPct = totals.total ? (diff / totals.total) * 100 : 0;
+  const usdShare = totals.total ? (usdTotal / totals.total) * 100 : 0;
+  const dir = move > 0 ? "円安" : move < 0 ? "円高" : "変化なし";
+  const moveBtns = [-30, -20, -10, -5, 5, 10, 20, 30].map((v) => `<button data-fx-preset="${v}" style="padding:6px 10px;border-radius:999px;font-size:12px;font-weight:700;border:1px solid #DAD4C4;background:${state.fxMove===v?'#16324F':'#fff'};color:${state.fxMove===v?'#F3F0E8':'#16324F'};">${v>0?"+":""}${v}円</button>`).join("");
+  const compareRows = [30, 20, 10, 5].map((v) => {
+    const upTotal = otherTotal + usdTotal * (1 + v / rate);
+    const downTotal = otherTotal + usdTotal * (1 - v / rate);
+    return `<div style="display:flex;justify-content:space-between;font-size:12px;padding:6px 0;border-bottom:1px solid #EDE8DA;">
+      <span class="tabular" style="color:#B5432E;">円安+${v}円 → ${yen(upTotal)}</span>
+      <span class="tabular" style="color:#4A7FA6;">円高-${v}円 → ${yen(downTotal)}</span>
+    </div>`;
+  }).join("");
+  return `<div class="card">
+    <div style="font-size:13px;font-weight:700;margin-bottom:2px;">為替（円安・円高）シミュレーション</div>
+    <div style="font-size:11px;color:#7A7261;margin-bottom:12px;">米ドル建ての資産（現在 ${yen(usdTotal)}・資産全体の${pct(usdShare)}）が対象です。円・その他通貨の資産は変動しない前提です。</div>
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;">
+      <span style="font-size:11px;color:#7A7261;">基準レート</span>
+      <input id="fx-rate" type="number" class="tabular" value="${esc(state.fxRate)}" style="width:80px;text-align:center;border:1px solid #DAD4C4;border-radius:6px;padding:4px 0;font-size:13px;" />
+      <span style="font-size:11px;color:#7A7261;">円/ドル</span>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">${moveBtns}</div>
+    <input id="fx-move-range" type="range" min="-40" max="40" value="${move}" style="width:100%;accent-color:#16324F;" />
+    <div style="text-align:center;font-size:12px;color:#7A7261;margin-top:2px;margin-bottom:14px;">${dir}：<span class="tabular" style="font-weight:700;color:#16324F;">${move>=0?"+":""}${move}円</span>（${rate}円 → ${(rate+move).toFixed(1)}円）</div>
+    <div style="display:flex;justify-content:space-around;background:#F3F0E8;border-radius:10px;padding:10px 0;">
+      <div style="text-align:center;"><div style="font-size:11px;color:#7A7261;">変動後の資産合計</div><div class="tabular" style="font-size:16px;font-weight:700;color:#16324F;">${yen(newTotal)}</div></div>
+      <div style="text-align:center;"><div style="font-size:11px;color:#7A7261;">増減</div><div class="tabular" style="font-size:16px;font-weight:700;color:${diff>=0?'#3B7D6B':'#B5432E'};">${diff>=0?"+":""}${yen(diff)}（${diff>=0?"+":""}${pct(diffPct)}）</div></div>
+    </div>
+    <div style="font-size:10px;color:#B0A990;margin-top:10px;text-align:center;">※基準レートは目安です。実際の相場に合わせて書き換えて使ってください</div>
+  </div>
+  <div class="card">
+    <div style="font-size:13px;font-weight:700;margin-bottom:10px;">変動幅ごとの比較（現在レート基準）</div>
+    ${usdTotal > 0 ? compareRows : `<div style="font-size:12px;color:#7A7261;">米ドル建ての資産が登録されていません。</div>`}
+  </div>`;
+}
+
+function navHTML() {
+  const items = [["assets","資産","👛"],["breakdown","内訳","📊"],["targets","配分","⚖️"],["trend","推移","📈"],["crash","暴落","📉"],["fx","為替","💱"]];
+  return `<div style="position:fixed;bottom:0;left:0;right:0;background:#FBF9F4;border-top:1px solid #DAD4C4;display:flex;">
+    ${items.map(([id,label,icon]) => `<div data-tab="${id}" style="flex:1;text-align:center;padding:10px 0 12px;color:${state.tab===id?'#16324F':'#B0A990'};cursor:pointer;">
+      <div style="font-size:16px;">${icon}</div>
+      <div style="font-size:10px;margin-top:3px;font-weight:${state.tab===id?700:400};">${label}</div>
+    </div>`).join("")}
+  </div>`;
+}
+
+function weightEditorHTML(prefix, items, presets) {
+  const rows = items.map((s) => `<div style="display:flex;gap:6px;margin-bottom:6px;">
+    <input list="${prefix}-list" id="${prefix}-name-${s.id}" value="${esc(s.name)}" placeholder="名称" class="input" style="flex:2;" />
+    <input type="number" id="${prefix}-weight-${s.id}" value="${s.weight}" placeholder="%" class="input" style="flex:1;" />
+    <span data-remove-${prefix}="${s.id}" style="cursor:pointer;color:#B5432E;font-size:15px;padding:0 4px;">✕</span>
+  </div>`).join("");
+  const options = presets.map((p) => `<option value="${esc(p)}"></option>`).join("");
+  return `${rows}<datalist id="${prefix}-list">${options}</datalist>
+    <button id="${prefix}-add" style="font-size:12px;color:#16324F;background:none;border:1px dashed #DAD4C4;border-radius:8px;padding:6px 10px;margin-top:2px;">+ 追加</button>`;
+}
+
+function formHTML() {
+  const f = state.form;
+  const showSectorEditor = f.category === "株式" || f.category === "投資信託";
+  const sectorSum = f.sectors.reduce((s, x) => s + Number(x.weight || 0), 0);
+  const catOptions = CATEGORIES.map((c) => `<option value="${c}" ${f.category===c?'selected':''}>${c}</option>`).join("");
+  const curOptions = CURRENCY_PRESETS.map((c) => `<option value="${c}" ${f.currency===c?'selected':''}>${c}</option>`).join("");
+  const canSave = f.institution.trim() && f.name.trim() && f.amountJPY;
+  return `<div style="position:fixed;inset:0;background:rgba(22,50,79,.35);display:flex;align-items:flex-end;z-index:10;">
+    <div style="background:#F3F0E8;width:100%;max-height:88vh;overflow-y:auto;border-radius:16px 16px 0 0;padding:18px 18px 24px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+        <div style="font-size:15px;font-weight:700;">${f.id ? "資産を編集" : "資産を追加"}</div>
+        <span id="close-form" style="font-size:18px;cursor:pointer;">✕</span>
+      </div>
+      <div class="field"><div class="field-label">金融機関</div><input id="f-institution" class="input" value="${esc(f.institution)}" placeholder="例：楽天証券" /></div>
+      <div class="field"><div class="field-label">名称（銘柄名・口座名など）</div><input id="f-name" class="input" value="${esc(f.name)}" placeholder="例：eMAXIS Slim米国株式(S&P500)" /></div>
+      <div class="field"><div class="field-label">資産区分</div><select id="f-category" class="input">${catOptions}</select></div>
+      <div class="field"><div class="field-label">通貨</div><select id="f-currency" class="input">${curOptions}</select>
+        ${f.currency === "その他" ? `<input id="f-currency-custom" class="input" style="margin-top:6px;" value="${esc(f.currencyCustom)}" placeholder="例：ユーロ" />` : ""}
+      </div>
+      <div class="field"><div class="field-label">評価額（円）</div><input id="f-amount" type="number" class="input" value="${esc(f.amountJPY)}" placeholder="1000000" /></div>
+      ${showSectorEditor ? `<div class="field"><div class="field-label" style="display:flex;justify-content:space-between;align-items:center;">
+          <span>業種・セクター配分（合計 ${Math.round(sectorSum*10)/10}% ・ 保存時に自動で100%に調整されます）</span>
+        </div>
+        <button id="sector-autofill" type="button" style="font-size:11px;color:#16324F;background:#EDE8DA;border:none;border-radius:8px;padding:6px 10px;margin-bottom:8px;">名称から自動入力（参考値）</button>
+        ${f.autofillMsg ? `<div style="font-size:11px;color:#B5432E;margin-bottom:6px;">${esc(f.autofillMsg)}</div>` : ""}
+        ${weightEditorHTML("sector", f.sectors, SECTOR_PRESETS)}</div>` : ""}
+      <button id="save-btn" ${canSave ? "" : "disabled"} style="width:100%;margin-top:16px;background:#16324F;color:#F3F0E8;border:none;border-radius:10px;padding:13px 0;font-size:14px;font-weight:700;opacity:${canSave?1:0.4};">保存する</button>
+    </div>
+  </div>`;
+}
+
+function renderApp() {
+  const totals = computeTotals();
+  const root = document.getElementById("root");
+  let content = "";
+  if (state.tab === "assets") content = assetsTabHTML();
+  else if (state.tab === "breakdown") content = breakdownTabHTML(totals);
+  else if (state.tab === "targets") content = targetsTabHTML(totals);
+  else if (state.tab === "trend") content = trendTabHTML(totals);
+  else if (state.tab === "crash") content = crashTabHTML(totals);
+  else if (state.tab === "fx") content = fxTabHTML(totals);
+  root.innerHTML = headerHTML(totals)
+    + `<div style="padding:16px 16px 100px;">${content}</div>`
+    + navHTML()
+    + (state.form ? formHTML() : "");
+  attachEvents();
+  persist();
+}
+
+function withFocusPreserved(id, updater) {
+  const el = document.getElementById(id);
+  const start = el && typeof el.selectionStart === "number" ? el.selectionStart : null;
+  const end = el && typeof el.selectionEnd === "number" ? el.selectionEnd : null;
+  updater();
+  renderApp();
+  const el2 = document.getElementById(id);
+  if (el2) {
+    el2.focus();
+    if (start != null && el2.setSelectionRange) { try { el2.setSelectionRange(start, end); } catch (e) {} }
+  }
+}
+
+function openAdd() { state.form = emptyForm(); renderApp(); }
+function openEdit(id) {
+  const a = state.assets.find((x) => x.id === id);
+  if (!a) return;
+  state.form = {
+    ...a,
+    currencyCustom: CURRENCY_PRESETS.includes(a.currency) ? "" : a.currency,
+    currency: CURRENCY_PRESETS.includes(a.currency) ? a.currency : "その他",
+    sectors: a.sectors && a.sectors.length ? a.sectors.map((s) => ({ ...s, id: s.id || uid() })) : [{ id: uid(), name: "", weight: 100 }],
+  };
+  renderApp();
+}
+function saveForm() {
+  const f = state.form;
+  if (!f.institution.trim() || !f.name.trim() || !f.amountJPY) return;
+  const currency = f.currency === "その他" ? (f.currencyCustom.trim() || "その他") : f.currency;
+  const showSectors = f.category === "株式" || f.category === "投資信託";
+  const sectors = showSectors ? normalizeWeights(f.sectors, "未分類") : [{ id: uid(), name: DEFAULT_SECTOR_BY_CATEGORY[f.category] || f.category, weight: 100 }];
+  const classes = [{ id: uid(), name: DEFAULT_CLASS_BY_CATEGORY[f.category] || "その他", weight: 100 }];
+  const entry = { id: f.id || uid(), institution: f.institution.trim(), name: f.name.trim(), category: f.category, currency, amountJPY: Number(f.amountJPY), sectors, classes };
+  const exists = state.assets.some((a) => a.id === entry.id);
+  state.assets = exists ? state.assets.map((a) => (a.id === entry.id ? entry : a)) : [...state.assets, entry];
+  state.form = null;
+  renderApp();
+}
+function removeAsset(id) { state.assets = state.assets.filter((a) => a.id !== id); state.confirmDelete = null; renderApp(); }
+
+function attachEvents() {
+  document.querySelectorAll("[data-tab]").forEach((el) => { el.onclick = () => { state.tab = el.getAttribute("data-tab"); renderApp(); }; });
+  const addBtn = document.getElementById("add-btn"); if (addBtn) addBtn.onclick = openAdd;
+  const backupCopyBtn = document.getElementById("backup-copy");
+  if (backupCopyBtn) backupCopyBtn.onclick = () => {
+    const ta = document.getElementById("backup-text");
+    ta.focus(); ta.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (e) {}
+    if (!ok && navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(ta.value).then(() => { state.backupMsg = "コピーしました"; renderApp(); }).catch(() => { state.backupMsg = "コピーできませんでした。手動で選択してコピーしてください"; renderApp(); });
+      return;
+    }
+    state.backupMsg = ok ? "コピーしました" : "コピーできませんでした。手動で選択してコピーしてください";
+    renderApp();
+  };
+  const backupImportBtn = document.getElementById("backup-import");
+  if (backupImportBtn) backupImportBtn.onclick = () => {
+    const ta = document.getElementById("backup-text");
+    try {
+      const parsed = JSON.parse(ta.value);
+      if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.assets)) throw new Error("bad shape");
+      state.assets = parsed.assets;
+      state.targets = { ...DEFAULT_TARGETS, ...(parsed.targets || {}) };
+      state.history = Array.isArray(parsed.history) ? parsed.history : [];
+      state.backupMsg = "読み込みました";
+      renderApp();
+    } catch (e) {
+      state.backupMsg = "読み込みに失敗しました。テキストの内容を確認してください";
+      renderApp();
+    }
+  };
+  document.querySelectorAll("[data-edit]").forEach((el) => { el.onclick = () => openEdit(el.getAttribute("data-edit")); });
+  document.querySelectorAll("[data-delete]").forEach((el) => { el.onclick = () => { state.confirmDelete = el.getAttribute("data-delete"); renderApp(); }; });
+  document.querySelectorAll("[data-confirm-delete]").forEach((el) => { el.onclick = () => removeAsset(el.getAttribute("data-confirm-delete")); });
+  document.querySelectorAll("[data-cancel-delete]").forEach((el) => { el.onclick = () => { state.confirmDelete = null; renderApp(); }; });
+
+  if (state.tab === "targets") {
+    TARGET_CLASSES.forEach((k) => {
+      const id = "target-input-" + k;
+      const el = document.getElementById(id);
+      if (el) {
+        el.oninput = () => { state.targets[k] = el.value; };
+        el.onblur = () => {
+          let v = Number(state.targets[k]);
+          if (!isFinite(v)) v = 0;
+          v = Math.max(0, Math.min(100, v));
+          state.targets[k] = v;
+          renderApp();
+        };
+      }
+    });
+  }
+  if (state.tab === "crash") {
+    document.querySelectorAll("[data-crash-preset]").forEach((el) => { el.onclick = () => { state.crashPct = Number(el.getAttribute("data-crash-preset")); renderApp(); }; });
+    const range = document.getElementById("crash-range");
+    if (range) range.oninput = () => { state.crashPct = Number(range.value); renderApp(); };
+    document.querySelectorAll("[data-scenario]").forEach((el) => { el.onclick = () => { state.historicalScenario = el.getAttribute("data-scenario"); renderApp(); }; });
+  }
+  if (state.tab === "fx") {
+    const rateEl = document.getElementById("fx-rate");
+    if (rateEl) {
+      rateEl.oninput = () => { state.fxRate = rateEl.value; };
+      rateEl.onblur = () => { let v = Number(state.fxRate); if (!isFinite(v) || v <= 0) v = DEFAULT_FX_RATE; state.fxRate = v; renderApp(); };
+    }
+    document.querySelectorAll("[data-fx-preset]").forEach((el) => { el.onclick = () => { state.fxMove = Number(el.getAttribute("data-fx-preset")); renderApp(); }; });
+    const moveRange = document.getElementById("fx-move-range");
+    if (moveRange) moveRange.oninput = () => { state.fxMove = Number(moveRange.value); renderApp(); };
+  }
+  if (state.tab === "trend") {
+    const recordBtn = document.getElementById("record-btn"); if (recordBtn) recordBtn.onclick = recordSnapshot;
+    document.querySelectorAll("[data-delete-snapshot]").forEach((el) => { el.onclick = () => removeSnapshot(el.getAttribute("data-delete-snapshot")); });
+  }
+
+  if (state.form) {
+    const f = state.form;
+    const bindText = (id, setter) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.oninput = () => setter(el.value);
+      el.onblur = () => renderApp();
+    };
+    bindText("f-institution", (v) => (f.institution = v));
+    bindText("f-name", (v) => (f.name = v));
+    bindText("f-amount", (v) => (f.amountJPY = v));
+    bindText("f-currency-custom", (v) => (f.currencyCustom = v));
+    const catSel = document.getElementById("f-category"); if (catSel) catSel.onchange = () => { f.category = catSel.value; renderApp(); };
+    const curSel = document.getElementById("f-currency"); if (curSel) curSel.onchange = () => { f.currency = curSel.value; renderApp(); };
+    const closeBtn = document.getElementById("close-form"); if (closeBtn) closeBtn.onclick = () => { state.form = null; renderApp(); };
+    const saveBtn = document.getElementById("save-btn"); if (saveBtn) saveBtn.onclick = saveForm;
+    const autofillBtn = document.getElementById("sector-autofill");
+    if (autofillBtn) autofillBtn.onclick = () => {
+      const guess = guessSectors(f.name);
+      if (guess) { f.sectors = guess; f.autofillMsg = ""; } else { f.autofillMsg = "一致する銘柄が見つかりませんでした。手動で入力してください。"; }
+      renderApp();
+    };
+
+    const prefix = "sector";
+    f.sectors.forEach((it) => {
+      bindText(prefix + "-name-" + it.id, (v) => (it.name = v));
+      bindText(prefix + "-weight-" + it.id, (v) => (it.weight = v));
+    });
+    document.querySelectorAll("[data-remove-" + prefix + "]").forEach((el) => {
+      el.onclick = () => {
+        const rid = el.getAttribute("data-remove-" + prefix);
+        f.sectors = f.sectors.filter((x) => x.id !== rid);
+        renderApp();
+      };
+    });
+    const addBtnP = document.getElementById(prefix + "-add");
+    if (addBtnP) addBtnP.onclick = () => {
+      f.sectors = [...f.sectors, { id: uid(), name: "", weight: 0 }];
+      renderApp();
+    };
+  }
+}
+
+loadState();
+renderApp();
+</script>
+</body>
+</html>
