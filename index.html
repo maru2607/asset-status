@@ -308,7 +308,8 @@
       "消費財":"#d98a94","資本財":"#8496ab","エネルギー":"#df9c4a","素材":"#b08d63",
       "公益事業":"#a8c69f","分散":"#9aa7b1",
       "JPY":"#7ba05b","USD":"#527ca3","EUR":"#8d84b8","GBP":"#c08d4e","AUD":"#5fa39a",
-      "円建て（JPY）":"#7ba05b","ドル建て（USD）":"#527ca3","ユーロ建て（EUR）":"#8d84b8"
+      "円建て（JPY）":"#7ba05b","ドル建て（USD）":"#527ca3","ユーロ建て（EUR）":"#8d84b8",
+      "円（JPY）":"#7ba05b","米ドル（USD）":"#527ca3","ユーロ（EUR）":"#8d84b8"
     };
     var PALETTE = ["#527ca3","#7ba05b","#d98a94","#8fb0d1","#c9a36a","#a8c69f","#df9c4a","#5fa39a","#8496ab","#b08d63","#8d84b8","#aeb4ba"];
     function colorFor(name, index) {
@@ -319,7 +320,11 @@
     var DEFAULT_FIRE = {
       currentAge: 32, monthlySaving: 210000, annualReturnPct: 4,
       annualSpending: 0, sideIncome: 0, withdrawalRatePct: 4,
-      inflationPct: 0, crashEnabled: false, crashDropPct: 30
+      inflationPct: 0, crashEnabled: false, crashDropPct: 30,
+      taxEnabled: true, sideBurdenRatePct: 20,
+      nisaPct: 50, gainSharePct: 50, withdrawalTaxPct: 20.315,
+      postRetirementBurden: 400000,
+      longevityAge: 100
     };
 
     var CRASH_SCENARIOS = [
@@ -450,6 +455,66 @@
       return out;
     }
 
+    // ------------------------------------------------------------------
+    // Currency exposure (look-through): JPY / USD / EUR / その他, in %.
+    // 購入通貨（円建てで買えるファンド等）ではなく、その資産が実質的に
+    // どの通貨へさらされているか。初期値は商品名・種類からの推定で、
+    // 資産ごとに currencyWeights を保存すればそちらが優先される。
+    // ------------------------------------------------------------------
+    var EXPOSURE_CURRENCIES = ["JPY","USD","EUR","その他"];
+    var CUR_EXP_WORLD = {"USD":70,"EUR":10,"JPY":5,"その他":15};
+    var CUR_EXP_DEVELOPED = {"USD":75,"EUR":10,"その他":15};
+    var CUR_EXP_EUROPE = {"EUR":70,"その他":30};
+    function estimateCurrencyExposure(name, cls) {
+      var n = String(name || "").toUpperCase().replace(/\s+/g, "");
+      var raw = String(name || "");
+      function has() {
+        for (var i = 0; i < arguments.length; i++) {
+          if (n.indexOf(String(arguments[i]).toUpperCase()) >= 0 || raw.indexOf(arguments[i]) >= 0) return true;
+        }
+        return false;
+      }
+      // 為替ヘッジありは、元の通貨が何でも円100%（ヘッジなしは対象外）
+      if (has("ヘッジあり","ヘッジ有り","ヘッジ付き","ヘッジ付","為替ヘッジ有","HEDGED")) return {"JPY":100};
+      if (has("ビットコイン","イーサリアム","暗号資産","仮想通貨","BTC","ETH","リップル","XRP")) return {"その他":100};
+      if (has("全世界","オールカントリー","オルカン","オール・カントリー","ACWI","VT","2559")) return Object.assign({}, CUR_EXP_WORLD);
+      if (has("VGK","欧州","ヨーロッパ","ユーロ圏","欧州株")) return Object.assign({}, CUR_EXP_EUROPE);
+      if (has("先進国","VEA","2513")) return Object.assign({}, CUR_EXP_DEVELOPED);
+      if (has("新興国","VWO","エマージング")) return {"その他":100};
+      if (has("ゴールド","GLD","GLDM","IAU","金ETF","純金")) return {"USD":100};
+      if (has("米国債","アメリカ国債","米国国債","トレジャリー","AGG","BND","BNDX","TLT")) return {"USD":100};
+      if (has("NASDAQ","ナスダック","QQQ","S&P","Ｓ＆Ｐ","VYM","VOO","VTI","SPY","IVV","全米","米国","アメリカ","NYダウ","ダウ","SOXX","テクノロジー","半導体","ヘルスケア","医療","バイオ")) return {"USD":100};
+      if (has("TOPIX","日経","日本株","日本株式","1306","個人向け国債","国債")) return {"JPY":100};
+      if (has("ユーロ","EUR")) return Object.assign({}, CUR_EXP_EUROPE);
+      switch (cls.assetClass) {
+        case "国債": return {"JPY":100};
+        case "現金": return cls.currency === "USD" ? {"USD":100} : cls.currency === "EUR" ? {"EUR":100} : cls.currency === "JPY" ? {"JPY":100} : {"その他":100};
+        case "年金": return Object.assign({}, CUR_EXP_WORLD);
+        case "コモディティ": return {"USD":100};
+        case "暗号資産": return {"その他":100};
+      }
+      if (cls.currency === "USD") return {"USD":100};
+      if (cls.currency === "EUR") return Object.assign({}, CUR_EXP_EUROPE);
+      if (cls.currency === "JPY") return {"JPY":100};
+      if (cls.currency && cls.currency !== "JPY") return {"その他":100};
+      if (cls.sector === "分散") return Object.assign({}, CUR_EXP_WORLD);
+      return {"JPY":100};
+    }
+    function effectiveCurrencyExposure(h) {
+      var stored = Object.keys(h.currencyWeights || {}).filter(function(k){ return EXPOSURE_CURRENCIES.indexOf(k) >= 0 && h.currencyWeights[k] > 0; });
+      var raw;
+      if (stored.length > 0) {
+        raw = {}; stored.forEach(function(k){ raw[k] = h.currencyWeights[k]; });
+      } else {
+        raw = estimateCurrencyExposure(h.name, { assetClass: h.assetClass, currency: h.currency, sector: h.sector });
+      }
+      var sum = Object.keys(raw).reduce(function(s,k){ return s + raw[k]; }, 0);
+      if (sum <= 0) return {"JPY":100};
+      var out = {};
+      Object.keys(raw).forEach(function(k){ out[k] = raw[k] / sum * 100; });
+      return out;
+    }
+
     function aggregateSectorMix(holdings) {
       var investedTotal = 0, excludedTotal = 0, map = {};
       holdings.forEach(function(h) {
@@ -550,47 +615,103 @@
     // ------------------------------------------------------------------
     // FIRE projection (same math as the original)
     // ------------------------------------------------------------------
-    var MAX_AGE = 100;
+    function clampPct(v) { var n = Number(v); if (!Number.isFinite(n)) return 0; return Math.min(100, Math.max(0, n)); }
+    // 税金・社会保険料の簡易モデル：有効な前提値をまとめて返す。
+    // taxEnabled が false のときは負担率・課税・上乗せはすべて 0 になり、
+    // 従来どおり（税・社保を考慮しない）計算と一致する。
+    function fireTaxParams(s) {
+      var enabled = !!s.taxEnabled;
+      var sideRate = enabled ? clampPct(s.sideBurdenRatePct) : 0;
+      // 取り崩し課税：税額 = 取り崩し額 × 非NISA割合 × 利益部分の割合 × 税率。
+      // NISA分は非課税、非NISA分も利益部分にのみ税率がかかる前提。
+      var nisaPct = enabled ? clampPct(s.nisaPct == null ? 50 : s.nisaPct) : 100;
+      var gainPct = enabled ? clampPct(s.gainSharePct == null ? 50 : s.gainSharePct) : 0;
+      var wTaxPct = enabled ? clampPct(s.withdrawalTaxPct == null ? 20.315 : s.withdrawalTaxPct) : 0;
+      var dragRate = enabled ? (1 - nisaPct / 100) * (gainPct / 100) * (wTaxPct / 100) : 0;
+      var burden = enabled ? Math.max(0, Number(s.postRetirementBurden) || 0) : 0;
+      var sideGross = Math.max(0, Number(s.sideIncome) || 0);
+      var sideNet = sideGross * (1 - sideRate / 100);
+      return {
+        enabled: enabled, sideBurdenRatePct: sideRate,
+        nisaPct: nisaPct, nonNisaPct: 100 - nisaPct, gainSharePct: gainPct, withdrawalTaxPct: wTaxPct,
+        dragRate: dragRate, netFactor: 1 - dragRate,
+        burden: burden, sideGross: sideGross, sideNet: sideNet
+      };
+    }
+    // その年に必要な「額面の取り崩し額」。手取りで必要な額（生活費＋退職後の
+    // 公的負担 − パート手取り）を、取り崩し課税の目減り分だけ割り戻す。
+    function fireGrossFullAt(s, tax, g, y) {
+      var netNeed = (Number(s.annualSpending) || 0) + tax.burden;
+      return tax.netFactor > 0 ? netNeed * Math.pow(1 + g, y) / tax.netFactor : Infinity;
+    }
+    function fireGrossSideAt(s, tax, g, y) {
+      var netRemain = Math.max(0, (Number(s.annualSpending) || 0) + tax.burden - tax.sideNet);
+      return tax.netFactor > 0 ? netRemain * Math.pow(1 + g, y) / tax.netFactor : Infinity;
+    }
+    function fireLongevityAge(s) {
+      var L = Math.round(Number(s.longevityAge) || 100);
+      return Math.min(120, Math.max((Number(s.currentAge) || 0) + 1, L));
+    }
+    // 想定寿命まで枯渇しないために、その年（year）の時点で必要な残高。
+    // 取り崩しを後ろから割り戻して求める：need_{y} = (need_{y+1} + 支出_y) / (1+r)
+    function fireRequiredSeries(s, tax, g, r, n, side) {
+      var req = new Array(n + 1);
+      var need = 0;
+      req[n] = 0;
+      for (var y = n - 1; y >= 0; y--) {
+        var spend = side ? fireGrossSideAt(s, tax, g, y) : fireGrossFullAt(s, tax, g, y);
+        need = (need + spend) / (1 + r);
+        req[y] = need;
+      }
+      return req;
+    }
     function fireProject(startBalance, s) {
-      var r = s.annualReturnPct / 100, g = s.inflationPct / 100, wr = s.withdrawalRatePct / 100;
+      var r = s.annualReturnPct / 100, g = s.inflationPct / 100;
+      var tax = fireTaxParams(s);
+      var L = fireLongevityAge(s), n = L - s.currentAge;
+      var reqFull = fireRequiredSeries(s, tax, g, r, n, false);
+      var reqSide = fireRequiredSeries(s, tax, g, r, n, true);
       var series = [], balance = startBalance;
       var reachFull = null, reachSide = null, depleteFull = null, depleteSide = null;
       var balSideDraw = null;
-      function spendingAt(y) { return s.annualSpending * Math.pow(1 + g, y); }
-      function sideNeedAt(y) { return Math.max(0, s.annualSpending - s.sideIncome) * Math.pow(1 + g, y); }
-      function targetFullAt(y) { return wr > 0 ? spendingAt(y) / wr : Infinity; }
-      function targetSideAt(y) { return wr > 0 ? sideNeedAt(y) / wr : Infinity; }
-      for (var year = 0; year <= MAX_AGE - s.currentAge; year++) {
+      function spendingAt(y) { return fireGrossFullAt(s, tax, g, y); }
+      function sideNeedAt(y) { return fireGrossSideAt(s, tax, g, y); }
+      for (var year = 0; year <= n; year++) {
         var age = s.currentAge + year;
-        var tF = targetFullAt(year), tS = targetSideAt(year);
+        var tF = reqFull[year], tS = reqSide[year];
         series.push({ age: age, balance: Math.max(0, balance), targetFull: tF, targetSide: tS });
-        if (reachSide === null && balance >= tS && tS > 0) { reachSide = age; balSideDraw = balance; }
+        if (reachSide === null && balance >= tS) { reachSide = age; balSideDraw = balance; }
         if (reachFull === null && balance >= tF && tF > 0) { reachFull = age; }
         if (reachFull === null) {
           balance = balance * (1 + r) + s.monthlySaving * 12;
         } else if (depleteFull === null) {
           balance = balance * (1 + r) - spendingAt(year);
-          if (balance <= 0 && age < MAX_AGE) depleteFull = age + 1;
+          if (balance <= 0 && age < L) depleteFull = age + 1;
         }
         if (balSideDraw !== null && depleteSide === null && reachSide !== age) {
           balSideDraw = balSideDraw * (1 + r) - sideNeedAt(year);
-          if (balSideDraw <= 0 && age < MAX_AGE) depleteSide = age + 1;
+          if (balSideDraw <= 0 && age < L) depleteSide = age + 1;
         }
-        if (age >= MAX_AGE) break;
+        if (age >= L) break;
       }
-      return { series: series, reachFull: reachFull, reachSide: reachSide, depleteFull: depleteFull, depleteSide: depleteSide };
+      return { series: series, reachFull: reachFull, reachSide: reachSide, depleteFull: depleteFull, depleteSide: depleteSide, reqFull: reqFull, reqSide: reqSide, longevityAge: L };
     }
     function computeFire(startBalance, s) {
       var wr = s.withdrawalRatePct / 100;
-      var targetFull = wr > 0 ? s.annualSpending / wr : 0;
-      var targetSide = wr > 0 ? Math.max(0, s.annualSpending - s.sideIncome) / wr : 0;
+      var tax = fireTaxParams(s);
+      var L = fireLongevityAge(s);
       var base = fireProject(startBalance, s);
+      // 主基準：想定寿命（初期値100歳）まで枯渇しないために今必要な額
+      var targetFull = base.reqFull[0], targetSide = base.reqSide[0];
+      // 参考：取り崩し率ベースの簡易必要額
+      var targetFullWr = wr > 0 ? fireGrossFullAt(s, tax, s.inflationPct / 100, 0) / wr : 0;
+      var targetSideWr = wr > 0 ? fireGrossSideAt(s, tax, s.inflationPct / 100, 0) / wr : 0;
       var crashSeries = null, crashReachAgeFull = null, crashReachDelayYears = null, crashDepletionAgeFull = null;
       if (s.crashEnabled && base.reachFull !== null) {
         var dropYearIndex = base.reachFull - s.currentAge;
         var r = s.annualReturnPct / 100, g = s.inflationPct / 100;
         var bal = startBalance, reach = null, deplete = null, pts = [];
-        for (var year = 0; year <= MAX_AGE - s.currentAge; year++) {
+        for (var year = 0; year <= L - s.currentAge; year++) {
           var age = s.currentAge + year;
           if (year === dropYearIndex) bal *= 1 - s.crashDropPct / 100;
           var tF = base.series[year] ? base.series[year].targetFull : Infinity;
@@ -600,10 +721,10 @@
           if (reach === null) {
             bal = bal * (1 + r) + s.monthlySaving * 12;
           } else if (deplete === null) {
-            bal = bal * (1 + r) - s.annualSpending * Math.pow(1 + g, year);
-            if (bal <= 0 && age < MAX_AGE) deplete = age + 1;
+            bal = bal * (1 + r) - fireGrossFullAt(s, tax, g, year);
+            if (bal <= 0 && age < L) deplete = age + 1;
           }
-          if (age >= MAX_AGE) break;
+          if (age >= L) break;
         }
         crashSeries = pts;
         crashReachAgeFull = reach;
@@ -612,15 +733,18 @@
       }
       return {
         targetFull: targetFull, targetSide: targetSide,
+        targetFullWr: targetFullWr, targetSideWr: targetSideWr,
+        longevityAge: L,
         reachAgeFull: base.reachFull, reachAgeSide: base.reachSide,
         yearsFull: base.reachFull !== null ? base.reachFull - s.currentAge : null,
         yearsSide: base.reachSide !== null ? base.reachSide - s.currentAge : null,
         progressFull: targetFull > 0 ? Math.min(100, startBalance / targetFull * 100) : 0,
-        progressSide: targetSide > 0 ? Math.min(100, startBalance / targetSide * 100) : 0,
+        progressSide: targetSide > 0 ? Math.min(100, startBalance / targetSide * 100) : (targetSide === 0 ? 100 : 0),
         depletionAgeFull: base.depleteFull, depletionAgeSide: base.depleteSide,
         series: base.series, crashSeries: crashSeries,
         crashReachAgeFull: crashReachAgeFull, crashReachDelayYears: crashReachDelayYears,
-        crashDepletionAgeFull: crashDepletionAgeFull
+        crashDepletionAgeFull: crashDepletionAgeFull,
+        tax: tax
       };
     }
     </script>
@@ -747,6 +871,16 @@
           if (Number.isFinite(w) && w > 0) sw[k] = w;
         });
       }
+      var cwObj = pickField(a, ["currencyWeights","currencyExposure","exposureWeights","currencyMix","currencyBreakdown"]);
+      var cw = {};
+      if (cwObj.found && cwObj.value && typeof cwObj.value === "object" && !Array.isArray(cwObj.value)) {
+        Object.keys(cwObj.value).forEach(function(k) {
+          var key = String(k).toUpperCase();
+          var mapped = key === "JPY" || k === "円" ? "JPY" : key === "USD" || k === "ドル" || k === "米ドル" ? "USD" : key === "EUR" || k === "ユーロ" ? "EUR" : (k === "その他" || key === "OTHER" || key === "OTHERS" ? "その他" : null);
+          var w = Number(cwObj.value[k]);
+          if (mapped && Number.isFinite(w) && w > 0) cw[mapped] = (cw[mapped] || 0) + w;
+        });
+      }
       var idPick = pickField(a, ["id"]);
       return {
         id: idPick.found && typeof idPick.value === "string" ? idPick.value : newId(),
@@ -755,16 +889,18 @@
         currency: currency,
         sector: sector,
         sectorWeights: sw,
+        currencyWeights: cw,
         valueJpy: v
       };
     }
     function sanitizeFire(f) {
       var out = Object.assign({}, DEFAULT_FIRE);
       if (f && typeof f === "object") {
-        ["currentAge","monthlySaving","annualReturnPct","annualSpending","sideIncome","withdrawalRatePct","inflationPct","crashDropPct"].forEach(function(k) {
+        ["currentAge","monthlySaving","annualReturnPct","annualSpending","sideIncome","withdrawalRatePct","inflationPct","crashDropPct","sideBurdenRatePct","nisaPct","gainSharePct","withdrawalTaxPct","postRetirementBurden","longevityAge"].forEach(function(k) {
           var v = Number(f[k]); if (Number.isFinite(v)) out[k] = v;
         });
         out.crashEnabled = !!f.crashEnabled;
+        out.taxEnabled = ("taxEnabled" in f) ? !!f.taxEnabled : DEFAULT_FIRE.taxEnabled;
       }
       return out;
     }
@@ -939,35 +1075,36 @@
         '<p class="num" style="margin:6px 0 0;font-size:13px;color:var(--dim)">進捗 ' + fmtPct(progress) + " ／ 必要資産 " + fmtYen(target) +
           (reachAge !== null ? " ／ " + reachAge + "歳で到達見込み" : "") + "</p></div>";
     }
-    // Currency breakdown for the dashboard: group each holding by the
-    // currency set on the holding itself (its purchase currency /
-    // currency exposure), valued in yen. JPY / USD / EUR are shown on
-    // their own; GBP, AUD and anything else are grouped as その他.
-    // All four buckets are always listed (even at ¥0) so the split is
-    // readable at a glance.
+    // Currency breakdown for the dashboard: look-through (実質的な通貨
+    // エクスポージャー). Each holding's yen value is split by its
+    // effective currency exposure (stored currencyWeights, or the
+    // name-based estimate), so a yen-denominated world fund still
+    // counts mostly as USD exposure. All four buckets are always
+    // listed (even at ¥0) so the split is readable at a glance.
     function currencyDisplaySlices(holdings) {
       var total = totalOf(holdings);
       var buckets = { JPY: 0, USD: 0, EUR: 0, OTHER: 0 };
       holdings.forEach(function(h) {
-        if (h.currency === "JPY") buckets.JPY += h.valueJpy;
-        else if (h.currency === "USD") buckets.USD += h.valueJpy;
-        else if (h.currency === "EUR") buckets.EUR += h.valueJpy;
-        else buckets.OTHER += h.valueJpy;
+        var exp = effectiveCurrencyExposure(h);
+        buckets.JPY += h.valueJpy * (exp.JPY || 0) / 100;
+        buckets.USD += h.valueJpy * (exp.USD || 0) / 100;
+        buckets.EUR += h.valueJpy * (exp.EUR || 0) / 100;
+        buckets.OTHER += h.valueJpy * (exp["その他"] || 0) / 100;
       });
       function pct(v) { return total > 0 ? v / total * 100 : 0; }
       return [
-        { name: "円建て（JPY）", value: buckets.JPY, pct: pct(buckets.JPY) },
-        { name: "ドル建て（USD）", value: buckets.USD, pct: pct(buckets.USD) },
-        { name: "ユーロ建て（EUR）", value: buckets.EUR, pct: pct(buckets.EUR) },
+        { name: "円（JPY）", value: buckets.JPY, pct: pct(buckets.JPY) },
+        { name: "米ドル（USD）", value: buckets.USD, pct: pct(buckets.USD) },
+        { name: "ユーロ（EUR）", value: buckets.EUR, pct: pct(buckets.EUR) },
         { name: "その他", value: buckets.OTHER, pct: pct(buckets.OTHER) }
       ];
     }
     function currencyCardHTML(holdings, total) {
       var slices = currencyDisplaySlices(holdings);
-      return '<section class="card"><h2>通貨別の割合（円換算）</h2><div class="donut-flex">' +
+      return '<section class="card"><h2>通貨別の割合（実質エクスポージャー・円換算）</h2><div class="donut-flex">' +
         donutSVG(slices, 168, fmtYen(total), "総資産") +
         '<div style="flex:1 1 220px">' + sliceListHTML(slices) + "</div></div>" +
-        '<p class="note divider-note">集計の前提：各資産に設定された「通貨」（購入通貨／通貨エクスポージャー）ごとに、円換算の評価額で集計し、総資産に対する割合を表示しています。GBP・AUD・その他は「その他」にまとめています。投資信託・ETFのファンド内部の実質的な通貨配分や、為替ヘッジの有無までは反映していません。通貨は「資産」タブの編集画面で変更できます。</p></section>';
+        '<p class="note divider-note">集計の前提：購入通貨（建て）ではなく、実質的な通貨エクスポージャー（目安）で集計しています。各資産の円換算評価額を、その資産の通貨エクスポージャー内訳で按分し、総資産に対する割合を表示しています。内訳の初期値は商品名からの推定で、代表的な指数構成に基づく概算です（例：全世界株式は米ドル約70%・ユーロ約10%・円約5%・その他約15%、全米株式や為替ヘッジなしのゴールドは米ドル100%、VGK等の欧州株はユーロ約70%・その他約30%、為替ヘッジありは円100%）。内訳は「資産」タブの編集画面で変更できます。GBP・CHFなどは「その他」にまとめています。</p></section>';
     }
     function dashboardHTML() {
       var holdings = state.assets;
@@ -983,7 +1120,7 @@
       }
       var total = totalOf(holdings);
       var byClass = aggregate(holdings, "assetClass");
-      var byCurrency = aggregate(holdings, "currency");
+      var byCurrency = currencyDisplaySlices(holdings);
       var mix = aggregateSectorMix(holdings);
       var snaps = state.snapshots;
       var latest = snaps.length > 0 ? snaps[snaps.length - 1] : null;
@@ -1053,9 +1190,9 @@
       var lines = [];
       var top = byClass[0];
       if (top) lines.push("最大の資産クラスは「" + top.name + "」で全体の " + fmtPct(top.pct) + " を占めています。");
-      var foreign = byCurrency.filter(function(s){ return s.name !== "JPY"; })
+      var foreign = byCurrency.filter(function(s){ return s.name !== "円（JPY）"; })
         .reduce(function(s,x){ return s + x.pct; }, 0);
-      if (foreign > 0) lines.push("外貨建て資産は " + fmtPct(foreign) + "。円高になると円換算額が目減りする点は「暴落・為替」タブで確認できます。");
+      if (foreign > 0) lines.push("外貨への実質エクスポージャーは " + fmtPct(foreign) + "（購入通貨ではなく内訳ベース）。円高になると円換算額が目減りする点は「暴落・為替」タブで確認できます。");
       var cash = byClass.find(function(s){ return s.name === "現金"; });
       if (cash && cash.pct >= 20) lines.push("現金クラスが " + fmtPct(cash.pct) + " と厚めです。生活防衛資金として十分なら、余剰分の扱いを検討してもよい水準です。");
       if (mix.slices.length > 0) lines.push("分野では「" + mix.slices[0].name + "」が投資総資産の " + fmtPct(mix.slices[0].pct) + " と最大です。");
@@ -1087,6 +1224,9 @@
         mixTouched: false,
         mix: asset ? effectiveMix(asset) : estimateSectorMix("", cls),
         storedWeights: asset ? Object.assign({}, asset.sectorWeights || {}) : {},
+        curTouched: false,
+        curMix: asset ? effectiveCurrencyExposure(asset) : estimateCurrencyExposure("", cls),
+        storedCurWeights: asset ? Object.assign({}, asset.currencyWeights || {}) : {},
         error: ""
       };
       render();
@@ -1108,6 +1248,21 @@
         (addable.length ? '<p class="small dim" style="margin:0 0 6px">分野を追加：</p><div class="chips">' +
           addable.map(function(s){ return '<button type="button" class="chip" data-mix-add="' + esc(s) + '">' + esc(s) + "</button>"; }).join("") + "</div>" : "");
     }
+    var CUR_LABELS = { "JPY": "円（JPY）", "USD": "米ドル（USD）", "EUR": "ユーロ（EUR）", "その他": "その他" };
+    var CUR_COLORS = { "JPY": "#7ba05b", "USD": "#527ca3", "EUR": "#8d84b8", "その他": "#aeb4ba" };
+    function curMixEditorInnerHTML() {
+      var fs = formState;
+      var rows = EXPOSURE_CURRENCIES.filter(function(k){ return fs.curMix[k] > 0; }).map(function(cur) {
+        return '<div class="mix-row"><span class="mix-name"><span class="dot" style="background:' + CUR_COLORS[cur] + '"></span>' + esc(CUR_LABELS[cur]) + "</span>" +
+          '<span class="mix-input-wrap"><input class="mix-input num" type="text" inputmode="decimal" data-curmix="' + esc(cur) + '" value="' + Math.round(fs.curMix[cur] * 10) / 10 + '" aria-label="' + esc(CUR_LABELS[cur]) + 'の割合"><span class="target-unit">%</span></span>' +
+          '<button type="button" class="mix-remove" data-curmix-remove="' + esc(cur) + '">外す</button></div>';
+      }).join("");
+      var addable = EXPOSURE_CURRENCIES.filter(function(s){ return !(fs.curMix[s] > 0); });
+      return '<div id="curMixRows">' + rows + "</div>" +
+        '<p class="note" style="margin:8px 0">商品名からの推定値（実質的な通貨エクスポージャーの目安）です。合計が100%にならなくても、保存時に比率へ換算します。直接書き換えると、その内訳が優先され、概要の通貨別割合と為替シミュレーションに使われます。</p>' +
+        (addable.length ? '<p class="small dim" style="margin:0 0 6px">通貨を追加：</p><div class="chips">' +
+          addable.map(function(s){ return '<button type="button" class="chip" data-curmix-add="' + esc(s) + '">' + esc(CUR_LABELS[s]) + "</button>"; }).join("") + "</div>" : "");
+    }
     function formHTML() {
       if (!formState || !formState.mode) return "";
       var asset = formState.mode === "edit" ? state.assets.find(function(a){ return a.id === formState.id; }) : null;
@@ -1120,10 +1275,13 @@
           '<input class="input num" id="fValue" type="text" inputmode="decimal" autocomplete="off" placeholder="例：300万、1500000" value="' + (asset ? esc(String(asset.valueJpy)) : "") + '">' +
           '<span class="hint">「300万」のような表記でも入力できます。</span></label>' +
         '<div class="field"><span class="flabel">資産クラス</span>' + chipsHTML("assetClass", ASSET_CLASSES, fs.cls.assetClass) + "</div>" +
-        '<div class="field"><span class="flabel">通貨（購入通貨／エクスポージャー）</span>' + chipsHTML("currency", CURRENCIES, fs.cls.currency) + '<span class="hint">概要タブの「通貨別の割合」は、この通貨ごとに円換算額で集計します。</span></div>' +
+        '<div class="field"><span class="flabel">通貨（代表）</span>' + chipsHTML("currency", CURRENCIES, fs.cls.currency) + '<span class="hint">代表通貨の目安です。概要タブの「通貨別の割合」と為替シミュレーションは、下の「通貨エクスポージャーの内訳（実質）」で集計します。</span></div>' +
         '<div class="field"><span class="flabel">分野（代表）</span>' + chipsHTML("sector", SECTORS, fs.cls.sector) + "</div>" +
         '<div class="field"><span class="flabel">分野の内訳（%）</span>' +
           '<div id="mixEditor">' + mixEditorInnerHTML() + "</div>" +
+        "</div>" +
+        '<div class="field"><span class="flabel">通貨エクスポージャーの内訳（%・実質）</span>' +
+          '<div id="curMixEditor">' + curMixEditorInnerHTML() + "</div>" +
         "</div>" +
         (fs.error ? '<p class="msg-err" style="margin:0 0 12px">' + esc(fs.error) + "</p>" : "") +
         '<div class="btn-row" style="margin-top:4px">' +
@@ -1146,13 +1304,15 @@
           var topMix = Object.keys(mix).sort(function(a,b){ return mix[b] - mix[a]; }).slice(0, 3)
             .map(function(k){ return k + " " + Math.round(mix[k]) + "%"; }).join("・");
           var confirmDel = formState && formState.deleteId === h.id;
-          var curLabel = h.currency === "JPY" ? "円建て（JPY）" : h.currency === "USD" ? "ドル建て（USD）" : h.currency === "EUR" ? "ユーロ建て（EUR）" : h.currency;
+          var exp = effectiveCurrencyExposure(h);
+          var topExp = EXPOSURE_CURRENCIES.filter(function(k){ return exp[k] > 0; }).sort(function(a,b){ return exp[b] - exp[a]; }).slice(0, 3)
+            .map(function(k){ return k + " " + Math.round(exp[k]) + "%"; }).join("・");
           return "<li>" +
             '<div class="asset-top"><span class="asset-name">' + esc(h.name) + '</span>' +
               '<span class="asset-value num">' + fmtYen(h.valueJpy) + "</span></div>" +
             '<div class="asset-meta">' +
               '<span class="tag"><span class="dot" style="display:inline-block;background:' + colorFor(h.assetClass, 0) + ';margin-right:5px"></span><b>' + esc(h.assetClass) + "</b></span>" +
-              "<span class=\"tag\">通貨 <b>" + esc(curLabel) + "</b></span>" +
+              (topExp ? '<span class="tag">実質通貨 <b>' + esc(topExp) + "</b></span>" : "") +
               "<span class=\"tag\">分野 <b>" + esc(h.sector) + "</b></span>" +
               (topMix ? '<span class="tag">内訳 ' + esc(topMix) + "</span>" : "") +
             "</div>" +
@@ -1219,14 +1379,53 @@
       '<p class="note" style="margin-top:10px">総資産は変えずに目標比率へ寄せる場合の金額です。実際の売買判断は手数料・税金も含めてご検討ください。</p>';
     }
     function refreshMixEstimate() {
-      if (!formState || !formState.mode || formState.mixTouched) return;
+      if (!formState || !formState.mode) return;
       var nameEl = document.getElementById("fName");
       var name = nameEl ? nameEl.value : "";
-      formState.mix = estimateSectorMix(name, formState.cls);
-      // Update only the mix editor block — never the whole view — so the
+      // Update only the editor blocks — never the whole view — so the
       // caret in the name field and scroll position stay exactly put.
-      var box = document.getElementById("mixEditor");
-      if (box) { box.innerHTML = mixEditorInnerHTML(); bindMix(); }
+      if (!formState.mixTouched) {
+        formState.mix = estimateSectorMix(name, formState.cls);
+        var box = document.getElementById("mixEditor");
+        if (box) { box.innerHTML = mixEditorInnerHTML(); bindMix(); }
+      }
+      if (!formState.curTouched) {
+        formState.curMix = estimateCurrencyExposure(name, formState.cls);
+        var cbox = document.getElementById("curMixEditor");
+        if (cbox) { cbox.innerHTML = curMixEditorInnerHTML(); bindCurMix(); }
+      }
+    }
+    function bindCurMix() {
+      document.querySelectorAll("[data-curmix]").forEach(function(inp) {
+        inp.addEventListener("input", function() { if (formState) formState.curTouched = true; });
+      });
+      document.querySelectorAll("[data-curmix-add]").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          if (!formState || !formState.mode) return;
+          captureCurMixInputs();
+          formState.curTouched = true;
+          formState.curMix[btn.getAttribute("data-curmix-add")] = 10;
+          var box = document.getElementById("curMixEditor");
+          if (box) { box.innerHTML = curMixEditorInnerHTML(); bindCurMix(); }
+        });
+      });
+      document.querySelectorAll("[data-curmix-remove]").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          if (!formState || !formState.mode) return;
+          captureCurMixInputs();
+          formState.curTouched = true;
+          delete formState.curMix[btn.getAttribute("data-curmix-remove")];
+          var box = document.getElementById("curMixEditor");
+          if (box) { box.innerHTML = curMixEditorInnerHTML(); bindCurMix(); }
+        });
+      });
+    }
+    function captureCurMixInputs() {
+      if (!formState) return;
+      document.querySelectorAll("[data-curmix]").forEach(function(inp) {
+        var w = parseDecimal(inp.value);
+        if (w !== null) formState.curMix[inp.getAttribute("data-curmix")] = w;
+      });
     }
     function bindMix() {
       document.querySelectorAll("[data-mix]").forEach(function(inp) {
@@ -1274,9 +1473,15 @@
         if (w !== null && w > 0) mix[inp.getAttribute("data-mix")] = w;
       });
       var weights = formState.mixTouched ? mix : formState.storedWeights;
+      var curMix = {};
+      document.querySelectorAll("[data-curmix]").forEach(function(inp) {
+        var w = parseDecimal(inp.value);
+        if (w !== null && w > 0) curMix[inp.getAttribute("data-curmix")] = w;
+      });
+      var curWeights = formState.curTouched ? curMix : formState.storedCurWeights;
       var data = {
         name: name, assetClass: formState.cls.assetClass, currency: formState.cls.currency,
-        sector: formState.cls.sector, sectorWeights: weights, valueJpy: value
+        sector: formState.cls.sector, sectorWeights: weights, currencyWeights: curWeights, valueJpy: value
       };
       if (formState.mode === "edit") {
         var idx = state.assets.findIndex(function(a){ return a.id === formState.id; });
@@ -1292,7 +1497,49 @@
     // ------------------------------------------------------------------
     // Simulate view （暴落・為替）
     // ------------------------------------------------------------------
-    var simState = { mode: "scenario", scenarioId: "lehman", uniformPct: 30, custom: null, yenMove: 20 };
+    var simState = { mode: "scenario", scenarioId: "lehman", uniformPct: 30, custom: null, yenMove: 20, fxCurrentRate: 155, fxTargetRate: 120 };
+    // 為替：ドル円が 現在レート → 目標レート へ動いたときの外貨建て資産の倍率。
+    // 例）155円 → 120円 なら倍率は 120/155（円高で外貨建ては目減り）。
+    function fxFactor() {
+      var cur = Number(simState.fxCurrentRate), tgt = Number(simState.fxTargetRate);
+      if (!Number.isFinite(cur) || cur <= 0 || !Number.isFinite(tgt) || tgt <= 0) return 1;
+      return tgt / cur;
+    }
+    function fxChangePct() { return (fxFactor() - 1) * 100; }
+    function fxDirectionLabel() {
+      var p = fxChangePct();
+      if (Math.abs(p) < 0.05) return "変動なし";
+      return p < 0 ? "円高" : "円安";
+    }
+    function fxTargetLabel() {
+      var p = fxChangePct();
+      return simState.fxTargetRate + "円（外貨 " + (p >= 0 ? "+" : "−") + Math.abs(p).toFixed(1) + "%・" + fxDirectionLabel() + "）";
+    }
+    function fxByCurrency(holdings) {
+      var factor = fxFactor();
+      var buckets = [
+        { name: "円（JPY）", key: "JPY", before: 0 },
+        { name: "米ドル（USD）", key: "USD", before: 0 },
+        { name: "ユーロ（EUR）", key: "EUR", before: 0 },
+        { name: "その他", key: "その他", before: 0 }
+      ];
+      holdings.forEach(function(h) {
+        var exp = effectiveCurrencyExposure(h);
+        buckets.forEach(function(b) { b.before += h.valueJpy * (exp[b.key] || 0) / 100; });
+      });
+      buckets.forEach(function(b) {
+        b.after = b.key === "JPY" ? b.before : b.before * factor;
+        b.lossPct = b.before > 0 ? (b.before - b.after) / b.before * 100 : 0;
+      });
+      return buckets;
+    }
+    // 1資産あたりの為替後倍率：円部分は不変、外貨部分（USD/EUR/その他）は
+    // ドル円と同じ変動率（factor）で動く前提。
+    function fxHoldingFactor(h) {
+      var exp = effectiveCurrencyExposure(h);
+      var foreign = 100 - (exp.JPY || 0);
+      return (exp.JPY || 0) / 100 + foreign / 100 * fxFactor();
+    }
     function simResult() {
       var holdings = state.assets;
       if (simState.mode === "scenario") {
@@ -1307,9 +1554,9 @@
         var cust = simState.custom || {};
         return { label: "クラス別カスタム", result: applyDrops(holdings, function(h){ return Number(cust[h.assetClass]) || 0; }) };
       }
-      var ym = simState.yenMove;
-      return { label: ym > 0 ? "円高 +" + ym + "%" : ym < 0 ? "円安 " + ym + "%" : "為替変動なし",
-               result: applyDrops(holdings, function(h){ return h.currency === "JPY" ? 0 : ym; }) };
+      var p = fxChangePct();
+      return { label: "ドル円 " + simState.fxCurrentRate + "円 → " + simState.fxTargetRate + "円（" + fxDirectionLabel() + "・外貨エクスポージャー " + (p >= 0 ? "+" : "−") + Math.abs(p).toFixed(1) + "%）",
+               result: applyDrops(holdings, function(h){ return (1 - fxHoldingFactor(h)) * 100; }) };
     }
     function sliderRowHTML(label, key, value, min, max) {
       return '<div class="slider-row"><div class="slider-head"><span>' + esc(label) + '</span>' +
@@ -1350,10 +1597,19 @@
           return sliderRowHTML(c + "の下落率", "custom:" + c, Number(simState.custom[c]) || 0, 0, 95);
         }).join("");
       } else if (simState.mode === "fx") {
-        html += '<div class="slider-row"><div class="slider-head"><span>円の変動（＋は円高／−は円安）</span>' +
-          '<span class="val num" id="sv-yen">' + (simState.yenMove > 0 ? "円高 " + simState.yenMove + "%" : simState.yenMove < 0 ? "円安 " + (-simState.yenMove) + "%" : "変動なし") + "</span></div>" +
-          '<input type="range" min="-50" max="50" step="1" value="' + simState.yenMove + '" data-slider="yen" aria-label="円の変動率"></div>' +
-          '<p class="note" style="margin:8px 0 0">外貨建て資産（JPY以外）の円換算額が、円の変動と同じ割合で増減する簡易試算です。円安の場合は資産が増える方向に表示されます。</p>';
+        var quickRates = [100, 120, 140, 160, 180, 200];
+        html += '<label class="field"><span class="flabel">現在の想定レート（ドル円）</span>' +
+          '<span style="display:flex;align-items:center;gap:6px"><input class="input num" id="fxCurrentInput" type="text" inputmode="decimal" data-fx="current" value="' + esc(String(simState.fxCurrentRate)) + '" autocomplete="off" aria-label="現在の想定レート（ドル円）"><span class="target-unit">円</span></span>' +
+          '<span class="hint">いまのドル円の目安です（初期値155円）。ここを基準に、目標レートまで動いた場合を試算します。</span></label>' +
+          '<div class="slider-row"><div class="slider-head"><span>目標レート（ドル円）</span>' +
+          '<span class="val num" id="sv-fxTarget">' + esc(fxTargetLabel()) + '</span></div>' +
+          '<input type="range" min="80" max="220" step="1" value="' + simState.fxTargetRate + '" data-slider="fxTarget" aria-label="目標レート（ドル円）"></div>' +
+          '<label class="field" style="margin-top:12px"><span class="flabel">目標レートを数字で入力（円）</span>' +
+          '<span style="display:flex;align-items:center;gap:6px"><input class="input num" id="fxTargetInput" type="text" inputmode="decimal" data-fx="target" value="' + esc(String(simState.fxTargetRate)) + '" autocomplete="off" aria-label="目標レートを数字で入力"><span class="target-unit">円</span></span></label>' +
+          '<p class="small dim" style="margin:0 0 6px">クイック選択：</p><div class="chips">' + quickRates.map(function(q) {
+            return '<button type="button" class="chip" data-fx-quick="' + q + '" aria-pressed="' + (Number(simState.fxTargetRate) === q) + '">' + q + "円</button>";
+          }).join("") + "</div>" +
+          '<p class="note" style="margin:10px 0 0">前提：各資産を通貨エクスポージャーの内訳（実質）で按分して再評価します。円（JPY）部分は変わらず、米ドル（USD）部分はドル円の変動率（目標レート ÷ 現在の想定レート − 1）で増減し、ユーロ（EUR）・その他の部分もドル円と同じ変動率で動く前提の簡易試算です（実際の他通貨レートはドル円と連動しない場合があります）。内訳は「資産」タブの編集画面で変更できます。</p>';
       }
       html += "</div>";
       html += '<div id="simResult" style="margin-top:18px;border-top:1px solid var(--border);padding-top:18px"></div>';
@@ -1375,16 +1631,23 @@
         "</div>" +
         '<p class="num" style="margin:4px 0 0;font-size:15px;font-weight:700;color:' + (down ? "var(--danger)" : "var(--green)") + '">' +
           (down ? "−" : "+") + fmtYen(Math.abs(res.loss)) + "（" + (down ? "−" : "+") + Math.abs(res.lossPct).toFixed(1) + "%）</p>";
-      html += '<div style="margin-top:14px">' + res.byClass.map(function(c, i) {
-        var wB = c.before / maxBefore * 100, wA = c.after / maxBefore * 100;
-        return '<div class="cmp-row"><div style="display:flex;gap:8px;align-items:baseline">' +
+      var isFx = simState.mode === "fx";
+      var rows = isFx ? fxByCurrency(state.assets) : res.byClass;
+      var rowMax = Math.max.apply(null, rows.map(function(c){ return c.before; }).concat([1]));
+      html += (isFx ? '<p class="small" style="font-weight:700;color:var(--dim);margin:16px 0 0">通貨別の影響</p>' : "") +
+        '<div style="margin-top:' + (isFx ? "6" : "14") + 'px">' + rows.map(function(c, i) {
+        var wB = c.before / rowMax * 100, wA = c.after / rowMax * 100;
+        var diff = c.after - c.before;
+        return '<div class="cmp-row"><div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">' +
           '<span class="dot" style="background:' + colorFor(c.name, i) + '"></span><span style="font-weight:500">' + esc(c.name) + "</span>" +
           '<span class="num" style="margin-left:auto">' + fmtYen(c.before) + " → <b>" + fmtYen(c.after) + "</b></span>" +
           '<span class="num dim" style="min-width:56px;text-align:right">' + (c.lossPct > 0 ? "−" : c.lossPct < 0 ? "+" : "") + Math.abs(c.lossPct).toFixed(1) + "%</span></div>" +
+          (isFx ? '<p class="num" style="margin:4px 0 0;font-size:13px;color:' + (diff < 0 ? "var(--danger)" : diff > 0 ? "var(--green)" : "var(--dim)") + '">増減 ' + (diff > 0 ? "+" : diff < 0 ? "−" : "") + fmtYen(Math.abs(diff)) + "</p>" : "") +
           '<div class="cmp-bars"><div class="cmp-bar-track"><div class="cmp-bar-fill" style="background:var(--dim);opacity:0.45;width:' + wB.toFixed(1) + '%"></div></div>' +
           '<div class="cmp-bar-track"><div class="cmp-bar-fill" style="background:' + colorFor(c.name, i) + ";width:" + wA.toFixed(1) + '%"></div></div></div></div>';
       }).join("") + "</div>";
-      html += '<p class="note" style="margin-top:12px">左のグレーのバーが現在、右の色付きバーがシミュレーション後の金額です（クラス間で同じ物差し）。</p>';
+      html += '<p class="note" style="margin-top:12px">左のグレーのバーが現在、右の色付きバーがシミュレーション後の金額です（' + (isFx ? "通貨区分" : "クラス") + '間で同じ物差し）。</p>' +
+        (isFx ? '<p class="note" style="margin-top:6px">通貨別の金額は実質エクスポージャーで按分したものです。ユーロ・その他の部分もドル円と同じ変動率で動く前提で、円部分は変動しません。</p>' : "");
       box.innerHTML = html;
     }
 
@@ -1400,30 +1663,50 @@
       var f = state.fire;
       var yen = function(v){ return v ? String(v) : ""; };
       var html = '<div class="stack"><section class="card"><h2>FIREシミュレーションの条件</h2>' +
-        '<p class="note" style="margin:0 0 16px">現在の資産は登録データ（' + fmtYen(totalOf(state.assets)) + "）を自動で使います。リターンは毎年一定という単純計算で、年金と税金は含みません（年金なし＝保守的な目安）。数字は将来の保証ではありません。</p>" +
+        '<p class="note" style="margin:0 0 16px">現在の資産は登録データ（' + fmtYen(totalOf(state.assets)) + "）を自動で使います。リターンは毎年一定という単純計算です。必要資産・到達年齢・進捗は「資産が想定寿命（初期値100歳）まで枯渇しない」ことを基準に計算しています（100歳まで持つ前提）。税金・社会保険料は下の「税金・社会保険料」設定で考慮できます（初期状態は考慮する）。公的年金の収入自体は計算に含みません（年金なし＝保守的な目安）。数字は将来の保証ではありません。</p>" +
         fireFieldHTML("現在の年齢（歳）", "currentAge", String(f.currentAge), "int") +
+        fireFieldHTML("想定寿命（歳）", "longevityAge", String(f.longevityAge == null ? 100 : f.longevityAge), "int", "初期値は100歳です。この年齢まで資産が持つことを、必要資産・到達年齢・進捗の基準にします。") +
         fireFieldHTML("毎月の積立額（円）", "monthlySaving", yen(f.monthlySaving), "yen", "「21万」のような表記でも入力できます。") +
         fireFieldHTML("想定リターン（年 %）", "annualReturnPct", String(f.annualReturnPct), "pct", "小数も入力できます（例：4.5）。") +
-        fireFieldHTML("年間支出（円）", "annualSpending", yen(f.annualSpending), "yen", "FIRE後に想定する1年の生活費。ここを入れると計算が始まります。") +
-        fireFieldHTML("サイドFIRE後のパート収入（年額・円）", "sideIncome", yen(f.sideIncome), "yen") +
-        fireFieldHTML("取り崩し率（%）", "withdrawalRatePct", String(f.withdrawalRatePct), "pct", "必要資産額 ＝ 年間支出 ÷ 取り崩し率。4%が目安とされます。") +
+        fireFieldHTML("年間支出（円）", "annualSpending", yen(f.annualSpending), "yen", "FIRE後に想定する1年の生活費（税・社保の負担分を除く）。ここを入れると計算が始まります。") +
+        fireFieldHTML("サイドFIRE後のパート収入（年額・額面、円）", "sideIncome", yen(f.sideIncome), "yen", "額面で入力してください。税金・社会保険料を考慮する場合は、下の設定の実効負担率で手取りに換算して計算します。") +
+        fireFieldHTML("取り崩し率（%・参考）", "withdrawalRatePct", String(f.withdrawalRatePct), "pct", "参考値です。取り崩し率ベースの簡易必要額（年間取り崩し額 ÷ この率）も結果に併記しますが、判定の主基準は「想定寿命まで持つ必要額」です。4%が目安とされます。") +
         fireFieldHTML("インフレ率（年 %）", "inflationPct", String(f.inflationPct), "pct") +
         '<label class="switch-row"><input type="checkbox" data-fire-crash ' + (f.crashEnabled ? "checked" : "") + "> 到達年に暴落が起きたケースも試算する</label>" +
         (f.crashEnabled ? fireFieldHTML("暴落の下落率（%）", "crashDropPct", String(f.crashDropPct), "pct", "到達が見えた最後の年に一度だけ下落する想定です。") : "") +
       "</section>";
+      // --- 税金・社会保険料（簡易モデル） ---
+      html += '<section class="card"><h2>税金・社会保険料</h2>' +
+        '<p class="note" style="margin:0 0 12px">簡易モデルです。実際の税額・保険料は収入の内訳、自治体、扶養や控除、口座ごとの含み益などで変わります。前提はすべてこの欄に明記し、数値は変更できます。</p>' +
+        '<label class="switch-row"><input type="checkbox" data-fire-tax ' + (f.taxEnabled ? "checked" : "") + "> 税金・社会保険料を考慮する</label>";
+      if (f.taxEnabled) {
+        html += '<div style="margin-top:10px">' +
+          fireFieldHTML("パート収入の実効負担率（%）", "sideBurdenRatePct", String(f.sideBurdenRatePct), "pct", "社会保険料＋所得税＋住民税をまとめた概算の負担率です。パート収入（額面）×（1 − この率）を手取りとして、サイドFIREの必要資産・到達年齢を計算します。") +
+          fireFieldHTML("資産全体のNISA割合（%）", "nisaPct", String(f.nisaPct == null ? 50 : f.nisaPct), "pct", "資産全体のうちNISA口座で保有している割合です。取り崩しもこの割合どおりNISAから出る前提で、NISA分は非課税として計算します。") +
+          fireFieldHTML("取り崩し額のうち利益部分の割合（%）", "gainSharePct", String(f.gainSharePct == null ? 50 : f.gainSharePct), "pct", "非NISA分の取り崩し額のうち、利益（課税対象）の割合です。残りは元本で、課税されません。") +
+          fireFieldHTML("税率（%）", "withdrawalTaxPct", String(f.withdrawalTaxPct == null ? 20.315 : f.withdrawalTaxPct), "pct", "利益部分にかかる税率です（譲渡益税率の目安20.315%）。") +
+          '<p class="note" style="margin:0 0 14px">NISA分は非課税。非NISA分は利益部分にのみ20.315%がかかる前提で計算します。取り崩し税額 ＝ 取り崩し額 × 非NISA割合 × 利益部分の割合 × 税率。初期値（NISA 50%・利益部分50%・税率20.315%）では実効の目減りは約5.1%で、必要な生活費をまかなうために取り崩し額と必要資産をその分だけ割り増しします。</p>' +
+          fireFieldHTML("退職後の公的負担（年額・円）", "postRetirementBurden", String(f.postRetirementBurden == null ? 400000 : f.postRetirementBurden), "yen", "国民健康保険料・国民年金保険料・住民税などをまとめた年間負担額です。取り崩し期の年間支出に上乗せします（インフレ率で毎年調整）。「40万」のような表記でも入力できます。") +
+        "</div>";
+      } else {
+        html += '<p class="note" style="margin:8px 0 0">現在は考慮していません。下の結果はすべて税・社会保険料を引く前の金額です。オンにすると、パート収入の手取り換算、取り崩し時の譲渡益課税、退職後の国民健康保険料・国民年金保険料・住民税などの負担を反映します。</p>';
+      }
+      html += "</section>";
       html += '<div id="fireResults"></div>';
       html += "</div>";
       return html;
     }
-    function fireCardHTML(title, color, target, progress, reachAge, years, depleteAge, currentAge) {
+    function fireCardHTML(title, color, target, targetWr, progress, reachAge, years, depleteAge, longevityAge) {
+      var L = longevityAge || 100;
       return '<section class="card"><p class="fire-stat-label" style="color:' + color + '">' + esc(title) + "</p>" +
-        '<p style="margin:8px 0 0"><span class="fire-stat-label">必要資産額</span><br><span class="fire-big num">' + fmtYen(target) + "</span></p>" +
+        '<p style="margin:8px 0 0"><span class="fire-stat-label">必要資産額（' + L + '歳まで持つ前提）</span><br><span class="fire-big num">' + fmtYen(target) + "</span></p>" +
+        '<p class="num" style="margin:4px 0 0;font-size:13px;color:var(--dim)">参考：取り崩し率ベースの簡易必要額は ' + fmtYen(targetWr) + "。" + (target > targetWr ? "長く持たせる分、主基準のほうが " + fmtYen(target - targetWr) + " 多く必要です" : target < targetWr ? "この条件では簡易必要額のほうが " + fmtYen(targetWr - target) + " 多くなります" : "簡易必要額と一致しています") + "</p>" +
         '<div class="progress-track" style="margin-top:12px"><div class="progress-fill" style="background:' + color + ";width:" + progress.toFixed(1) + '%"></div></div>' +
-        '<p class="num" style="margin:6px 0 0;font-size:13px;color:var(--dim)">進捗 ' + fmtPct(progress) + "</p>" +
-        '<p style="margin:14px 0 0"><span class="fire-stat-label">到達見込み</span><br><span class="fire-mid num">' +
-          (reachAge !== null ? reachAge + "歳（あと" + years + "年）" : "100歳までに到達しません") + "</span></p>" +
+        '<p class="num" style="margin:6px 0 0;font-size:13px;color:var(--dim)">進捗 ' + fmtPct(progress) + "（" + L + "歳まで持つ必要額に対して）</p>" +
+        '<p style="margin:14px 0 0"><span class="fire-stat-label">到達見込み（到達後は' + L + '歳まで持つ計算）</span><br><span class="fire-mid num">' +
+          (reachAge !== null ? reachAge + "歳（あと" + years + "年）" : L + "歳までに到達しません") + "</span></p>" +
         '<p style="margin:10px 0 0"><span class="fire-stat-label">取り崩しを始めた場合</span><br><span class="fire-mid num">' +
-          (depleteAge !== null ? depleteAge + "歳で資産が尽きる計算" : "100歳まで資産が持つ計算") + "</span></p></section>";
+          (depleteAge !== null ? depleteAge + "歳で資産が尽きる計算" : L + "歳まで資産が持つ計算") + "</span></p></section>";
     }
     function updateFireResults() {
       var box = document.getElementById("fireResults");
@@ -1441,16 +1724,47 @@
       }
       var res = computeFire(total, f);
       var html = '<div class="fire-grid">' +
-        fireCardHTML("サイドFIRE（パート収入あり）", "var(--green)", res.targetSide, res.progressSide, res.reachAgeSide, res.yearsSide, res.depletionAgeSide, f.currentAge) +
-        fireCardHTML("完全FIRE", "var(--accent)", res.targetFull, res.progressFull, res.reachAgeFull, res.yearsFull, res.depletionAgeFull, f.currentAge) +
+        fireCardHTML("サイドFIRE（パート収入あり）", "var(--green)", res.targetSide, res.targetSideWr, res.progressSide, res.reachAgeSide, res.yearsSide, res.depletionAgeSide, res.longevityAge) +
+        fireCardHTML("完全FIRE", "var(--accent)", res.targetFull, res.targetFullWr, res.progressFull, res.reachAgeFull, res.yearsFull, res.depletionAgeFull, res.longevityAge) +
         "</div>";
+      // --- 税・社保の影響（考慮前との比較） ---
+      if (f.taxEnabled && res.tax) {
+        var noTax = Object.assign({}, f, { taxEnabled: false });
+        var res0 = computeFire(total, noTax);
+        var tax = res.tax;
+        function ageText(a) { return a !== null ? a + "歳" : "到達しません"; }
+        function ageDiffText(a0, a1) {
+          if (a0 !== null && a1 !== null) return a1 === a0 ? "（変わらず）" : "（" + (a1 - a0 > 0 ? "+" : "") + (a1 - a0) + "年）";
+          if (a0 !== null && a1 === null) return "（考慮前は到達、考慮後は到達しません）";
+          if (a0 === null && a1 !== null) return "（考慮前は到達せず、考慮後は到達）";
+          return "（どちらも到達しません）";
+        }
+        function targetDiff(v0, v1) { var d = v1 - v0; return (d >= 0 ? "+" : "−") + fmtYen(Math.abs(d)); }
+        html += '<section class="card" style="margin-top:16px"><h2>税金・社会保険料の影響（考慮前との差）</h2>' +
+          '<ul style="margin:0;padding-left:20px;font-size:14px;line-height:1.9">' +
+          (tax.sideGross > 0
+            ? '<li>パート収入：額面 ' + fmtYen(tax.sideGross) + " → 手取り " + fmtYen(tax.sideNet) + "（実効負担率 " + fmtPct(tax.sideBurdenRatePct) + "、年 " + fmtYen(tax.sideGross - tax.sideNet) + " の負担）</li>"
+            : '<li>パート収入：入力がないため、手取り換算の影響はありません</li>') +
+          '<li>取り崩し課税：実効の目減り ' + fmtPct(tax.dragRate * 100, 2) + "（非NISA分 " + fmtPct(tax.nonNisaPct) + " × 利益部分 " + fmtPct(tax.gainSharePct) + " × 税率 " + fmtPct(tax.withdrawalTaxPct, 3) + "、NISA分 " + fmtPct(tax.nisaPct) + " は非課税）。取り崩し100万円あたりの手取りは約 " + fmtYen(1000000 * tax.netFactor) + " です</li>" +
+          '<li>退職後の公的負担：年 ' + fmtYen(tax.burden) + " を取り崩し期の支出に上乗せしています</li>" +
+          "</ul>" +
+          '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;font-size:14px;line-height:1.9" class="num">' +
+          "<p style=\"margin:0\">完全FIREの必要資産：考慮前 " + fmtYen(res0.targetFull) + " → 考慮後 <b>" + fmtYen(res.targetFull) + "</b>（" + targetDiff(res0.targetFull, res.targetFull) + "）</p>" +
+          "<p style=\"margin:0\">サイドFIREの必要資産：考慮前 " + fmtYen(res0.targetSide) + " → 考慮後 <b>" + fmtYen(res.targetSide) + "</b>（" + targetDiff(res0.targetSide, res.targetSide) + "）</p>" +
+          "<p style=\"margin:0\">完全FIREの到達：考慮前 " + ageText(res0.reachAgeFull) + " → 考慮後 <b>" + ageText(res.reachAgeFull) + "</b> " + ageDiffText(res0.reachAgeFull, res.reachAgeFull) + "</p>" +
+          "<p style=\"margin:0\">サイドFIREの到達：考慮前 " + ageText(res0.reachAgeSide) + " → 考慮後 <b>" + ageText(res.reachAgeSide) + "</b> " + ageDiffText(res0.reachAgeSide, res.reachAgeSide) + "</p>" +
+          "</div>" +
+          '<p class="note" style="margin-top:10px">公的年金の収入自体は計算に含まない前提は変わりません（上の公的負担は、年金保険料などの「払う側」だけを上乗せしたものです）。</p></section>';
+      } else {
+        html += '<section class="card" style="margin-top:16px"><h2>税金・社会保険料</h2><p class="dim" style="font-size:14px;margin:0;line-height:1.8">税金・社会保険料は考慮していません。上の「税金・社会保険料」設定をオンにすると、手取り換算・取り崩し課税・退職後の公的負担を反映し、考慮前との差も表示します。</p></section>';
+      }
       if (f.crashEnabled) {
         html += '<section class="card" style="margin-top:16px"><h2>到達年に −' + f.crashDropPct + '%の暴落が起きたら</h2>';
         if (res.crashSeries) {
           html += '<p class="num" style="margin:0;font-size:15px;line-height:1.9">完全FIREの到達は ' +
-            (res.crashReachAgeFull !== null ? "<b>" + res.crashReachAgeFull + "歳</b>" : "<b>100歳までに到達しません</b>") +
+            (res.crashReachAgeFull !== null ? "<b>" + res.crashReachAgeFull + "歳</b>" : "<b>" + res.longevityAge + "歳までに到達しません</b>") +
             (res.crashReachDelayYears !== null && res.crashReachDelayYears > 0 ? "（通常ケースより <b>" + res.crashReachDelayYears + "年</b> 遅れる）" : res.crashReachDelayYears === 0 ? "（通常ケースと同年に到達）" : "") +
-            "<br>取り崩し後は " + (res.crashDepletionAgeFull !== null ? res.crashDepletionAgeFull + "歳で資産が尽きる計算" : "100歳まで資産が持つ計算") + " です。</p>";
+            "<br>取り崩し後は " + (res.crashDepletionAgeFull !== null ? res.crashDepletionAgeFull + "歳で資産が尽きる計算" : res.longevityAge + "歳まで資産が持つ計算") + " です。</p>";
         } else {
           html += '<p class="dim" style="font-size:14px;margin:0">通常ケースで到達見込みがないため、暴落ケースは計算できません。</p>';
         }
@@ -1459,15 +1773,15 @@
       // Chart
       var series = [
         { label: "資産", color: "#527ca3", points: res.series.map(function(p){ return { x: p.age, y: p.balance }; }) },
-        { label: "完全FIREの目標額", color: "#cf7d88", points: res.series.map(function(p){ return { x: p.age, y: Number.isFinite(p.targetFull) ? p.targetFull : NaN }; }) },
-        { label: "サイドFIREの目標額", color: "#6d9448", points: res.series.map(function(p){ return { x: p.age, y: Number.isFinite(p.targetSide) ? p.targetSide : NaN }; }) }
+        { label: "完全FIRE必要額（" + res.longevityAge + "歳まで持つ）", color: "#cf7d88", points: res.series.map(function(p){ return { x: p.age, y: Number.isFinite(p.targetFull) ? p.targetFull : NaN }; }) },
+        { label: "サイドFIRE必要額（" + res.longevityAge + "歳まで持つ）", color: "#6d9448", points: res.series.map(function(p){ return { x: p.age, y: Number.isFinite(p.targetSide) ? p.targetSide : NaN }; }) }
       ];
       if (res.crashSeries) {
         series.push({ label: "資産（暴落ケース）", color: "#c99a3c", dash: true, points: res.crashSeries.map(function(p){ return { x: p.age, y: p.balance }; }) });
       }
       html += '<section class="card" style="margin-top:16px"><h2>資産推移の見通し</h2>' +
         lineChartSVG(series, function(x){ return x + "歳"; }, function(v){ return fmtYen(v); }, 250) +
-        '<p class="note" style="margin-top:10px">資産の線は、完全FIRE到達までは積立＋運用益で増え、到達後は年間支出を取り崩す前提で描いています。目標額はインフレ率に応じて毎年調整されます。</p></section>';
+        '<p class="note" style="margin-top:10px">資産の線は、完全FIRE到達までは積立＋運用益で増え、到達後は年間支出を取り崩す前提で描いています。目標額はインフレ率に応じて毎年調整されます。' + (f.taxEnabled ? "税金・社会保険料を考慮しているため、取り崩し額は課税で目減りする分と退職後の公的負担を割り増した額面ベースです。" : "") + '</p></section>';
       box.innerHTML = html;
     }
 
@@ -1521,7 +1835,7 @@
         version: 1,
         exportedAt: new Date().toISOString(),
         assets: state.assets.map(function(h) {
-          return { name: h.name, assetClass: h.assetClass, currency: h.currency, sector: h.sector, sectorWeights: h.sectorWeights, valueJpy: h.valueJpy };
+          return { name: h.name, assetClass: h.assetClass, currency: h.currency, sector: h.sector, sectorWeights: h.sectorWeights, currencyWeights: h.currencyWeights, valueJpy: h.valueJpy };
         }),
         snapshots: state.snapshots.map(function(s) {
           return { totalJpy: s.totalJpy, breakdown: s.breakdown, recordedAt: s.recordedAt };
@@ -1680,6 +1994,7 @@
         });
       }
       bindMix();
+      bindCurMix();
       // Target inputs: commit on change (blur/Enter) — typed text is kept
       // untouched while editing; only the rebalance box re-renders.
       document.querySelectorAll("[data-target]").forEach(function(inp) {
@@ -1711,10 +2026,11 @@
           var key = sl.getAttribute("data-slider");
           var v = Number(sl.value);
           if (key === "uniform") { simState.uniformPct = v; var o1 = document.getElementById("sv-uniform"); if (o1) o1.textContent = v + "%"; }
-          else if (key === "yen") {
-            simState.yenMove = v;
-            var o2 = document.getElementById("sv-yen");
-            if (o2) o2.textContent = v > 0 ? "円高 " + v + "%" : v < 0 ? "円安 " + (-v) + "%" : "変動なし";
+          else if (key === "fxTarget") {
+            simState.fxTargetRate = v;
+            var o2 = document.getElementById("sv-fxTarget"); if (o2) o2.textContent = fxTargetLabel();
+            var ti = document.getElementById("fxTargetInput"); if (ti) ti.value = String(v);
+            document.querySelectorAll("[data-fx-quick]").forEach(function(b){ b.setAttribute("aria-pressed", Number(b.getAttribute("data-fx-quick")) === v ? "true" : "false"); });
           } else if (key.indexOf("custom:") === 0) {
             if (!simState.custom) simState.custom = {};
             simState.custom[key.slice(7)] = v;
@@ -1723,6 +2039,37 @@
           }
           updateSimResult();
         });
+      });
+      // FX rate numeric inputs: update the maths without rewriting the
+      // field being typed in (same rule as the FIRE inputs).
+      document.querySelectorAll("[data-fx]").forEach(function(inp) {
+        inp.addEventListener("input", function() {
+          var which = inp.getAttribute("data-fx");
+          var v = parseDecimal(inp.value);
+          if (v === null || v <= 0) return;
+          if (which === "current") {
+            simState.fxCurrentRate = v;
+            var o = document.getElementById("sv-fxTarget"); if (o) o.textContent = fxTargetLabel();
+          } else if (which === "target") {
+            if (v < 80 || v > 220) return; // slider range; accept on change below
+            simState.fxTargetRate = v;
+            var sl = document.querySelector('[data-slider="fxTarget"]'); if (sl) sl.value = String(v);
+            var o2 = document.getElementById("sv-fxTarget"); if (o2) o2.textContent = fxTargetLabel();
+            document.querySelectorAll("[data-fx-quick]").forEach(function(b){ b.setAttribute("aria-pressed", Number(b.getAttribute("data-fx-quick")) === v ? "true" : "false"); });
+          }
+          updateSimResult();
+        });
+        inp.addEventListener("change", function() {
+          var which = inp.getAttribute("data-fx");
+          var v = parseDecimal(inp.value);
+          if (v === null || v <= 0) { render(); return; }
+          if (which === "target") simState.fxTargetRate = Math.min(220, Math.max(80, v));
+          if (which === "current") simState.fxCurrentRate = Math.min(400, Math.max(30, v));
+          render();
+        });
+      });
+      document.querySelectorAll("[data-fx-quick]").forEach(function(btn) {
+        btn.addEventListener("click", function() { simState.fxTargetRate = Number(btn.getAttribute("data-fx-quick")); render(); });
       });
       // FIRE inputs: commit parsed value on input/change without ever
       // rewriting the input's own text, so "4.5" / "300万" never vanish.
@@ -1733,6 +2080,8 @@
           var v = kind === "yen" ? parseAmount(inp.value) : parseDecimal(inp.value);
           if (v === null) return;
           if (key === "currentAge") v = Math.min(100, Math.max(0, Math.round(v)));
+          if (key === "sideBurdenRatePct" || key === "nisaPct" || key === "gainSharePct" || key === "withdrawalTaxPct") v = Math.min(100, Math.max(0, v));
+          if (key === "longevityAge") v = Math.min(120, Math.max(60, Math.round(v)));
           state.fire[key] = v;
           saveState();
           updateFireResults();
@@ -1746,6 +2095,14 @@
           state.fire.crashEnabled = crashBox.checked;
           saveState();
           render(); // re-render shows/hides the crash % field
+        });
+      }
+      var taxBox = document.querySelector("[data-fire-tax]");
+      if (taxBox) {
+        taxBox.addEventListener("change", function() {
+          state.fire.taxEnabled = taxBox.checked;
+          saveState();
+          render(); // re-render shows/hides the tax fields
         });
       }
       var fileEl = document.getElementById("importFile");
