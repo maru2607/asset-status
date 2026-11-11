@@ -272,6 +272,14 @@
       .msg-err { color: var(--danger); font-size: 14px; margin-top: 12px; }
       .btn-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
       .hidden { display: none !important; }
+
+      /* ---------- Save status / restore banner ---------- */
+      .savebar { max-width: 880px; margin: 0 auto; padding: 10px 16px 0; display: flex; justify-content: flex-end; }
+      .save-status { font-size: 12.5px; color: var(--dim); display: inline-flex; align-items: center; gap: 6px; min-height: 1.2em; }
+      .save-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+      .restore-wrap { padding-bottom: 0; }
+      .restore-card { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
+      .restore-card .btn-ghost { flex: 0 0 auto; }
       svg text { font-family: inherit; }
     </style>
   </head>
@@ -279,6 +287,8 @@
     <header class="topbar">
       <nav class="topbar-inner" aria-label="メインタブ" id="topTabs"></nav>
     </header>
+    <div class="savebar"><span class="save-status" id="saveStatus" role="status"></span></div>
+    <div class="wrap restore-wrap hidden" id="restoreBanner"></div>
     <main class="wrap">
       <div id="view"></div>
     </main>
@@ -801,8 +811,38 @@
     // ------------------------------------------------------------------
     // State (localStorage)
     // ------------------------------------------------------------------
+    // IMPORTANT: LS_KEY must never be renamed. Renaming the key (or
+    // changing the stored shape without a migration) makes previously
+    // saved data invisible — the "everything reset on reopen" bug.
+    // loadState() therefore also migrates data found under legacy keys
+    // or in older shapes, keeps a backup copy, and never overwrites
+    // stored data it could not read.
     var LS_KEY = "asset-dashboard-public-v1";
-    var state = loadState();
+    var LS_BACKUP_KEY = LS_KEY + "-backup";
+    var LS_STASH_KEY = LS_KEY + "-recovery";
+    var LEGACY_KEYS = ["asset-dashboard-v1", "asset-dashboard", "assetDashboard",
+      "asset-dashboard-public", "asset-dashboard-public-v0",
+      "portfolio-compass", "portfolio-compass-v1", "portfolio", "assets-data"];
+    var storageOK = true;
+    var lastSavedAt = null;
+    var lastPayload = null;
+    var restoreInfo = null; // {kind:'migrated'|'backup'|'stash', fromKey?, assets:n}
+    // True while stored data exists but could not be read into state
+    // (the unrecovered "stash" case). While true, saveState() refuses
+    // to write at all: the unreadable original bytes under LS_KEY /
+    // LS_BACKUP_KEY must survive until the user deliberately imports
+    // a backup. Without this guard, any save — including the pagehide
+    // flush — replaces the primary with the blank in-memory state,
+    // and the now-parseable blank primary then shadows the preserved
+    // original under the recovery key on every later open.
+    var recoveryPending = false;
+    // NOTE: state is assigned in the Init section at the very bottom,
+    // after every helper in this file has been defined. Calling
+    // loadState() here — before NAME_KEYS / VALUE_KEYS / sanitizeAsset
+    // below are initialized — throws inside the load, and the old
+    // catch-all silently fell back to a blank state: saved data looked
+    // "reset" on every reopen even though it was still in storage.
+    var state = null;
     function newId() { return "id-" + Date.now().toString(36) + "-" + Math.floor(Math.random() * 1e9).toString(36); }
     function blankState() {
       return { assets: [], snapshots: [], targets: Object.assign({}, DEFAULT_TARGETS), fire: Object.assign({}, DEFAULT_FIRE) };
@@ -953,32 +993,184 @@
       }
       return out;
     }
-    function loadState() {
-      try {
-        var raw = localStorage.getItem(LS_KEY);
-        if (!raw) return blankState();
-        var p = JSON.parse(raw);
+    // Build a state object from any stored/imported shape: the current
+    // raw shape, a wrapped {state|data|...} shape, or one whose asset
+    // list lives under holdings/items (or as an object map). Returns
+    // null when no asset list is recognizable at all.
+    function stateFromParsed(p) {
+      if (!p || typeof p !== "object") return null;
+      var containers = [p];
+      ["state","data","export","backup","payload","result"].forEach(function(k) {
+        if (p[k] && typeof p[k] === "object" && !Array.isArray(p[k])) containers.push(p[k]);
+      });
+      for (var ci = 0; ci < containers.length; ci++) {
+        var c = containers[ci];
+        var list = null;
+        if (Array.isArray(c.assets)) list = c.assets;
+        else if (Array.isArray(c.holdings)) list = c.holdings;
+        else if (Array.isArray(c.items)) list = c.items;
+        else if (c.assets && typeof c.assets === "object") list = Object.keys(c.assets).map(function(k){ return c.assets[k]; });
+        if (!list) continue;
         var s = blankState();
-        if (Array.isArray(p.assets)) s.assets = p.assets.map(sanitizeAsset).filter(Boolean);
-        if (Array.isArray(p.snapshots)) {
-          s.snapshots = p.snapshots.filter(function(x){ return x && Number.isFinite(Number(x.totalJpy)); }).map(function(x) {
+        s.assets = list.map(sanitizeAsset).filter(Boolean);
+        var snapsRaw = Array.isArray(c.snapshots) ? c.snapshots : (Array.isArray(c.history) ? c.history : null);
+        if (snapsRaw) {
+          s.snapshots = snapsRaw.filter(function(x){ return x && Number.isFinite(Number(x.totalJpy)); }).map(function(x) {
             return { id: typeof x.id === "string" ? x.id : newId(), totalJpy: Number(x.totalJpy),
                      breakdown: (x.breakdown && typeof x.breakdown === "object") ? x.breakdown : {},
                      recordedAt: typeof x.recordedAt === "string" ? x.recordedAt : new Date().toISOString() };
           });
         }
-        if (p.targets && typeof p.targets === "object") {
-          Object.keys(p.targets).forEach(function(k) {
-            var v = Number(p.targets[k]);
+        if (c.targets && typeof c.targets === "object") {
+          Object.keys(c.targets).forEach(function(k) {
+            var v = Number(c.targets[k]);
             if (ASSET_CLASSES.indexOf(k) >= 0 && Number.isFinite(v)) s.targets[k] = v;
           });
         }
-        s.fire = sanitizeFire(p.fire);
+        s.fire = sanitizeFire(c.fire || c.fireSettings || c.fireConfig);
         return s;
-      } catch (e) { return blankState(); }
+      }
+      return null;
+    }
+    function tryParseState(raw) {
+      if (!raw) return null;
+      try {
+        var p = JSON.parse(raw);
+        if (typeof p === "string") p = JSON.parse(p);
+        return stateFromParsed(p);
+      } catch (e) { return null; }
+    }
+    function stateHasData(s) { return !!s && (s.assets.length > 0 || s.snapshots.length > 0); }
+    // Look for a usable dataset under any other storage key (older
+    // builds of this dashboard, or a renamed key). Only a payload that
+    // sanitizes to at least one asset/snapshot counts.
+    function scanLegacyKeys() {
+      var keys = [];
+      LEGACY_KEYS.forEach(function(k){ if (keys.indexOf(k) < 0) keys.push(k); });
+      try {
+        for (var i = 0; i < localStorage.length; i++) {
+          var k = localStorage.key(i);
+          if (k && keys.indexOf(k) < 0) keys.push(k);
+        }
+      } catch (e) {}
+      for (var j = 0; j < keys.length; j++) {
+        var key = keys[j];
+        if (key === LS_KEY || key === LS_BACKUP_KEY || key === LS_STASH_KEY) continue;
+        var raw = null;
+        try { raw = localStorage.getItem(key); } catch (e) { continue; }
+        if (!raw || raw.length < 10) continue;
+        var st = tryParseState(raw);
+        if (st && stateHasData(st)) return { key: key, state: st };
+      }
+      return null;
+    }
+    function loadState() {
+      var primaryRaw = null;
+      try { primaryRaw = localStorage.getItem(LS_KEY); } catch (e) { storageOK = false; }
+      if (primaryRaw) {
+        var st = tryParseState(primaryRaw);
+        if (st) return st;
+        // Stored data exists but cannot be read (corrupt or an unknown
+        // future/past shape). Preserve the raw bytes untouched under a
+        // recovery key — never overwrite them with a blank state — and
+        // keep looking for a readable copy below.
+        try { if (!localStorage.getItem(LS_STASH_KEY)) localStorage.setItem(LS_STASH_KEY, primaryRaw); } catch (e) {}
+        restoreInfo = { kind: "stash", assets: 0 };
+      }
+      try {
+        var bakRaw = localStorage.getItem(LS_BACKUP_KEY);
+        if (bakRaw) {
+          var sb = tryParseState(bakRaw);
+          if (sb && stateHasData(sb)) { restoreInfo = { kind: "backup", assets: sb.assets.length }; return sb; }
+        }
+      } catch (e) {}
+      try {
+        var stashRaw = localStorage.getItem(LS_STASH_KEY);
+        if (stashRaw) {
+          var ss = tryParseState(stashRaw);
+          if (ss && stateHasData(ss)) { restoreInfo = { kind: "stash", assets: ss.assets.length }; return ss; }
+        }
+      } catch (e) {}
+      var mig = null;
+      try { mig = scanLegacyKeys(); } catch (e) { mig = null; }
+      if (mig) { restoreInfo = { kind: "migrated", fromKey: mig.key, assets: mig.state.assets.length }; return mig.state; }
+      // Nothing readable was found. If an unreadable original is still
+      // stored (the stash case above), mark recovery as pending so no
+      // save in this session can overwrite it.
+      if (restoreInfo && restoreInfo.kind === "stash") recoveryPending = true;
+      return blankState();
     }
     function saveState() {
-      try { localStorage.setItem(LS_KEY, JSON.stringify(state)); } catch (e) { /* storage full/blocked: keep in-memory */ }
+      // Unrecovered stash state: never overwrite the stored original.
+      // The only way out is a deliberate JSON import (which clears
+      // recoveryPending first) — every automatic or incidental save
+      // stays blocked so the primary and backup keys keep the
+      // original bytes.
+      if (recoveryPending) { updateSaveStatus(false, "読み込めなかった元のデータを守るため、いまは保存を止めています"); return false; }
+      var payload;
+      try { payload = JSON.stringify(state); } catch (e) { updateSaveStatus(false); return false; }
+      var ok = false;
+      try {
+        localStorage.setItem(LS_KEY, payload);
+        try { localStorage.setItem(LS_BACKUP_KEY, payload); } catch (e2) {}
+        // Verify the write actually landed (blocked/quota storage on
+        // iOS webviews can fail silently otherwise).
+        ok = localStorage.getItem(LS_KEY) === payload;
+      } catch (e) { ok = false; storageOK = false; }
+      if (ok) { lastSavedAt = new Date(); lastPayload = payload; }
+      updateSaveStatus(ok);
+      return ok;
+    }
+    function testStorage() {
+      try {
+        var k = LS_KEY + "-test";
+        localStorage.setItem(k, "1");
+        var v = localStorage.getItem(k);
+        localStorage.removeItem(k);
+        return v === "1";
+      } catch (e) { return false; }
+    }
+    function updateSaveStatus(ok, note) {
+      var el = document.getElementById("saveStatus");
+      if (!el) return;
+      if (!storageOK || ok === false) {
+        el.innerHTML = '<span class="save-dot" style="background:var(--danger)"></span>' + esc(note || "保存できませんでした（この開き方では保存が制限されています）");
+        return;
+      }
+      var label = note || (lastSavedAt
+        ? "この端末に保存済み " + lastSavedAt.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" })
+        : "この端末に保存済み");
+      el.innerHTML = '<span class="save-dot" style="background:var(--green)"></span>' + esc(label);
+    }
+    function showRestoreBanner() {
+      var el = document.getElementById("restoreBanner");
+      if (!el || !restoreInfo) return;
+      var msg = "";
+      if (restoreInfo.kind === "migrated") {
+        msg = "前のバージョンで保存されていたデータ（資産 " + restoreInfo.assets + " 件）を見つけて復旧しました。今後は自動でこの場所に保存されます。";
+      } else if (restoreInfo.kind === "backup") {
+        msg = "保存データの読み込みに問題があったため、バックアップから資産 " + restoreInfo.assets + " 件を復旧しました。";
+      } else if (restoreInfo.kind === "stash") {
+        msg = stateHasData(state)
+          ? "保存されていたデータを読み取り直して復旧しました（資産 " + restoreInfo.assets + " 件）。"
+          : "保存されていたデータを読み込めませんでした。元のデータは消さずに保管しています。JSONバックアップをお持ちの場合は「記録・データ」タブから読み込めます。";
+      }
+      if (!msg) return;
+      el.innerHTML = '<div class="card restore-card"><p style="margin:0;font-size:14px;line-height:1.8">' + esc(msg) +
+        '</p><button type="button" class="btn-ghost" id="restoreDismiss">閉じる</button></div>';
+      el.classList.remove("hidden");
+      var b = document.getElementById("restoreDismiss");
+      if (b) b.addEventListener("click", function(){ el.classList.add("hidden"); el.innerHTML = ""; });
+    }
+    function showStorageWarning() {
+      var el = document.getElementById("restoreBanner");
+      if (!el) return;
+      el.innerHTML = '<div class="card restore-card"><p style="margin:0;font-size:14px;line-height:1.8">' +
+        "この開き方ではブラウザの保存が制限されているため、入力したデータが次回開いたときに残らない場合があります。Safariで直接開き直すか、「記録・データ」タブからJSONを書き出して保管してください。" +
+        '</p><button type="button" class="btn-ghost" id="restoreDismiss">閉じる</button></div>';
+      el.classList.remove("hidden");
+      var b = document.getElementById("restoreDismiss");
+      if (b) b.addEventListener("click", function(){ el.classList.add("hidden"); el.innerHTML = ""; });
     }
 
     // ------------------------------------------------------------------
@@ -1972,7 +2164,7 @@
         '<p class="msg-ok' + (importNotice && importNotice.ok ? '' : ' hidden') + '" id="dataOk" role="status">' + (importNotice && importNotice.ok ? esc(importNotice.ok) : '') + '</p>' +
         '<p class="msg-err' + (importNotice && importNotice.err ? '' : ' hidden') + '" id="dataErr" role="alert">' + (importNotice && importNotice.err ? esc(importNotice.err) : '') + '</p>' +
         (importNotice && importNotice.ok ? '<div class="btn-row"><button type="button" class="btn-primary" data-action="go-dashboard">概要で総資産を確認する</button><button type="button" class="btn-ghost" data-action="go-assets">資産一覧を見る</button></div>' : '') +
-        '<p class="note divider-note">データはこの端末のブラウザ内にだけ保存されます。機種変更やブラウザのデータ消去に備えて、ときどきJSONで書き出しておくのがおすすめです。</p></section>';
+        '<p class="note divider-note">データはこの端末のブラウザ内にだけ保存されます。機種変更やブラウザのデータ消去に備えて、ときどきJSONで書き出しておくのがおすすめです。iPhoneでは、Safariで開いた場合とホーム画面のショートカットから開いた場合で保存場所が分かれることがあります。片方で入力したデータがもう片方に表示されないときは、入力した側でJSONを書き出して、もう片方で読み込んでください。</p></section>';
       html += "</div>";
       return html;
     }
@@ -2074,6 +2266,11 @@
       }
       var fireObj = findImportedObject(parsed, ["fire","fireSettings","fireConfig"]) || findImportedObject(parsed, ["settings"]);
       state = { assets: assets, snapshots: snaps, targets: targets, fire: sanitizeFire(fireObj) };
+      // A deliberate import replaces the stored data on purpose, so it
+      // is the one action allowed to lift the recovery save-block. The
+      // unreadable original bytes stay preserved under the recovery
+      // key (saveState never writes that key).
+      recoveryPending = false;
       saveState();
       // Verify the save actually landed (guards against blocked storage).
       var persisted = false;
@@ -2332,7 +2529,37 @@
       }
     });
 
-    // Init
+    // Init (state loads here, once every helper above is initialized)
+    state = loadState();
+    storageOK = testStorage();
+    if (restoreInfo && stateHasData(state)) {
+      // Migrated / recovered data: write it under the current key right
+      // away so the next open reads it from the primary location.
+      saveState();
+      showRestoreBanner();
+    } else if (restoreInfo && restoreInfo.kind === "stash") {
+      // Unrecovered: the original data could not be read. Keep saves
+      // blocked (recoveryPending was set by loadState) AND initialize
+      // lastPayload to the current state, so the pagehide flush below
+      // does not mistake "never saved this session" for "unsaved
+      // changes" and overwrite the primary/backup with a blank state.
+      recoveryPending = true;
+      try { lastPayload = JSON.stringify(state); } catch (e) { lastPayload = null; }
+      showRestoreBanner();
+    }
+    if (!storageOK) {
+      updateSaveStatus(false);
+      if (!restoreInfo) showStorageWarning();
+    } else if (!restoreInfo) {
+      try { lastPayload = JSON.stringify(state); } catch (e) { lastPayload = null; }
+      updateSaveStatus(true, stateHasData(state) ? "保存済み（前回のデータを読み込みました）" : "入力すると自動でこの端末に保存されます");
+    }
+    // Last-resort flush if anything changed without a save (there
+    // should be nothing: every mutation saves immediately).
+    window.addEventListener("pagehide", function() {
+      if (recoveryPending) return; // never flush over an unrecovered original
+      try { if (JSON.stringify(state) !== lastPayload) saveState(); } catch (e) {}
+    });
     renderTabs();
     render();
     </script>
