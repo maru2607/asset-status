@@ -324,7 +324,8 @@
       taxEnabled: true, sideBurdenRatePct: 20,
       nisaPct: 50, gainSharePct: 50, withdrawalTaxPct: 20.315,
       postRetirementBurden: 400000,
-      longevityAge: 100
+      longevityAge: 100,
+      pensionEnabled: true, pensionAnnual: 1300000, pensionStartAge: 65
     };
 
     var CRASH_SCENARIOS = [
@@ -406,6 +407,27 @@
     var MIX_EMERGING = {"金融":22,"テクノロジー":20,"消費財":15,"通信":10,"資本財":6,"素材":8,"エネルギー":6,"ヘルスケア":4,"公益事業":2,"不動産":2,"その他":5};
     var MIX_JAPAN = {"資本財":18,"テクノロジー":15,"消費財":16,"金融":12,"通信":8,"ヘルスケア":8,"素材":7,"公益事業":3,"不動産":3,"エネルギー":2,"その他":8};
 
+    // 内訳を合計ちょうど100.0%にそろえる：割合按分で正規化し、小数1桁に
+    // 丸めた端数は最大の分野で調整する。自動推定・保存済みデータの
+    // どちらにも使うので、合計≠100%の内訳が全体の割合をずらすことはない。
+    function roundMixTo100(raw) {
+      var keys = Object.keys(raw || {}).filter(function(k){ return Number(raw[k]) > 0; });
+      if (keys.length === 0) return {"その他":100};
+      var sum = keys.reduce(function(s,k){ return s + Number(raw[k]); }, 0);
+      if (!(sum > 0)) return {"その他":100};
+      var out = {};
+      keys.forEach(function(k){ out[k] = Math.round(Number(raw[k]) / sum * 100 * 10) / 10; });
+      var total = keys.reduce(function(s,k){ return s + out[k]; }, 0);
+      var diff = Math.round((100 - total) * 10) / 10;
+      if (diff !== 0) {
+        var largest = keys.reduce(function(a,b){ return out[b] > out[a] ? b : a; }, keys[0]);
+        out[largest] = Math.round((out[largest] + diff) * 10) / 10;
+      }
+      keys.forEach(function(k){ if (!(out[k] > 0)) delete out[k]; });
+      if (Object.keys(out).length === 0) return {"その他":100};
+      return out;
+    }
+
     function estimateSectorMix(name, cls) {
       var n = String(name || "").toUpperCase().replace(/\s+/g, "");
       function has() {
@@ -448,11 +470,9 @@
       } else {
         raw = estimateSectorMix(h.name, { assetClass: h.assetClass, currency: h.currency, sector: h.sector });
       }
-      var sum = Object.keys(raw).reduce(function(s,k){ return s + raw[k]; }, 0);
-      if (sum <= 0) return {"その他":100};
-      var out = {};
-      Object.keys(raw).forEach(function(k){ out[k] = raw[k] / sum * 100; });
-      return out;
+      // 保存済み・読み込みデータの合計が100%でなくても、計算時は必ず
+      // 割合按分で正規化し、合計ちょうど100%にしてから使う（黙ってずらさない）。
+      return roundMixTo100(raw);
     }
 
     // ------------------------------------------------------------------
@@ -638,14 +658,41 @@
         burden: burden, sideGross: sideGross, sideNet: sideNet
       };
     }
+    // 公的年金：65歳時点の見込み年額を、受給開始年齢で自動調整する。
+    // 繰上げは1か月あたり−0.4%（60歳で−24%）、繰下げは1か月あたり
+    // ＋0.7%（70歳で＋42%、75歳で＋84%）。年金額は手取り想定の入力とし、
+    // 年金自体への課税は別途計算しない。
+    function firePensionParams(s) {
+      var enabled = !!s.pensionEnabled;
+      var base = enabled ? Math.max(0, Number(s.pensionAnnual) || 0) : 0;
+      var startAge = Math.round(Number(s.pensionStartAge) || 65);
+      startAge = Math.min(75, Math.max(60, startAge));
+      var months = (startAge - 65) * 12;
+      var factor = months < 0 ? 1 + months * 0.004 : 1 + months * 0.007;
+      return {
+        enabled: enabled, baseAnnual: base, startAge: startAge,
+        months: months, factor: factor, adjustedAnnual: base * factor
+      };
+    }
+    // その年（現在から y 年後、年齢 = currentAge + y）に受け取る年金額。
+    // 受給開始年齢より前は 0。インフレ調整は支出側と同じ指数で行う呼び出し側前提で、
+    // ここでは「現在の物価水準での年額」を返す。
+    function firePensionAt(s, pension, y) {
+      if (!pension.enabled || pension.adjustedAnnual <= 0) return 0;
+      var age = (Number(s.currentAge) || 0) + y;
+      return age >= pension.startAge ? pension.adjustedAnnual : 0;
+    }
     // その年に必要な「額面の取り崩し額」。手取りで必要な額（生活費＋退職後の
-    // 公的負担 − パート手取り）を、取り崩し課税の目減り分だけ割り戻す。
+    // 公的負担 − 年金収入 − パート手取り、0未満にはしない）を、取り崩し
+    // 課税の目減り分だけ割り戻す。
     function fireGrossFullAt(s, tax, g, y) {
-      var netNeed = (Number(s.annualSpending) || 0) + tax.burden;
+      var pension = firePensionParams(s);
+      var netNeed = Math.max(0, (Number(s.annualSpending) || 0) + tax.burden - firePensionAt(s, pension, y));
       return tax.netFactor > 0 ? netNeed * Math.pow(1 + g, y) / tax.netFactor : Infinity;
     }
     function fireGrossSideAt(s, tax, g, y) {
-      var netRemain = Math.max(0, (Number(s.annualSpending) || 0) + tax.burden - tax.sideNet);
+      var pension = firePensionParams(s);
+      var netRemain = Math.max(0, (Number(s.annualSpending) || 0) + tax.burden - firePensionAt(s, pension, y) - tax.sideNet);
       return tax.netFactor > 0 ? netRemain * Math.pow(1 + g, y) / tax.netFactor : Infinity;
     }
     function fireLongevityAge(s) {
@@ -744,7 +791,8 @@
         series: base.series, crashSeries: crashSeries,
         crashReachAgeFull: crashReachAgeFull, crashReachDelayYears: crashReachDelayYears,
         crashDepletionAgeFull: crashDepletionAgeFull,
-        tax: tax
+        tax: tax,
+        pension: firePensionParams(s)
       };
     }
     </script>
@@ -896,11 +944,12 @@
     function sanitizeFire(f) {
       var out = Object.assign({}, DEFAULT_FIRE);
       if (f && typeof f === "object") {
-        ["currentAge","monthlySaving","annualReturnPct","annualSpending","sideIncome","withdrawalRatePct","inflationPct","crashDropPct","sideBurdenRatePct","nisaPct","gainSharePct","withdrawalTaxPct","postRetirementBurden","longevityAge"].forEach(function(k) {
+        ["currentAge","monthlySaving","annualReturnPct","annualSpending","sideIncome","withdrawalRatePct","inflationPct","crashDropPct","sideBurdenRatePct","nisaPct","gainSharePct","withdrawalTaxPct","postRetirementBurden","longevityAge","pensionAnnual","pensionStartAge"].forEach(function(k) {
           var v = Number(f[k]); if (Number.isFinite(v)) out[k] = v;
         });
         out.crashEnabled = !!f.crashEnabled;
         out.taxEnabled = ("taxEnabled" in f) ? !!f.taxEnabled : DEFAULT_FIRE.taxEnabled;
+        out.pensionEnabled = ("pensionEnabled" in f) ? !!f.pensionEnabled : DEFAULT_FIRE.pensionEnabled;
       }
       return out;
     }
@@ -1175,7 +1224,7 @@
           '<div style="flex:1 1 220px">' + sliceListHTML(mix.slices) + "</div></div>" +
           '<p class="note divider-note">割合は投資総資産（' + fmtYen(mix.investedTotal) + "＝現金クラスを除いた資産の合計）に対する比率です。" +
           (mix.excludedTotal > 0 ? "預金・MMFなどの現金クラス（" + fmtYen(mix.excludedTotal) + "）は分野に割り当てにくいため対象外にしています。国債は「債券」分野として投資総資産に含めています。" : "") +
-          "分野の内訳は各資産の推定（または資産の編集画面で設定した内訳）を金額で加重平均したものです。</p></section>";
+          "分野の内訳は各資産の推定（または資産の編集画面で設定した内訳）を金額で加重平均したものです。各資産の内訳は、合計が100%でない場合も計算時に割合按分で合計100%に正規化してから使います（未配分・超過分で全体の割合がずれることはありません）。</p></section>";
       }
 
       // Currency (grouped 円建て/ドル建て/ユーロ建て/その他, yen-based)
@@ -1222,7 +1271,7 @@
         cls: cls,
         manualClass: false, manualCurrency: false, manualSector: false,
         mixTouched: false,
-        mix: asset ? effectiveMix(asset) : estimateSectorMix("", cls),
+        mix: asset ? effectiveMix(asset) : roundMixTo100(estimateSectorMix("", cls)),
         storedWeights: asset ? Object.assign({}, asset.sectorWeights || {}) : {},
         curTouched: false,
         curMix: asset ? effectiveCurrencyExposure(asset) : estimateCurrencyExposure("", cls),
@@ -1243,8 +1292,14 @@
           '<button type="button" class="mix-remove" data-mix-remove="' + esc(sec) + '">外す</button></div>';
       }).join("");
       var addable = FIELD_SECTORS.filter(function(s){ return !(fs.mix[s] > 0); });
+      var mixSum = Object.keys(fs.mix).reduce(function(s,k){ return s + (Number(fs.mix[k]) || 0); }, 0);
+      var mixSumR = Math.round(mixSum * 10) / 10;
+      var mixOff = Math.abs(mixSumR - 100) > 0.05;
       return '<div id="mixRows">' + mixRows + "</div>" +
-        '<p class="note" style="margin:8px 0">商品名からの推定値です。合計が100%にならなくても、保存時に比率へ換算します。直接書き換えると、その内訳が優先されます。</p>' +
+        '<p class="note" style="margin:8px 0" id="mixSumLine">内訳の合計：<b class="num" id="mixSumVal">' + mixSumR + '%</b>' +
+          (mixOff ? ' <span style="color:var(--danger);font-weight:700">（100%になっていません。計算では割合按分で正規化されますが、そのままだと意図とずれることがあります）</span>' : ' <span style="color:var(--green);font-weight:700">（100%です）</span>') + "</p>" +
+        (mixOff ? '<p style="margin:0 0 8px"><button type="button" class="btn-ghost" data-mix-normalize>100%に自動調整（割合按分）</button></p>' : "") +
+        '<p class="note" style="margin:8px 0">商品名からの推定値です（推定値は合計100%にそろえてあります）。直接書き換えると、その内訳が優先されます。</p>' +
         (addable.length ? '<p class="small dim" style="margin:0 0 6px">分野を追加：</p><div class="chips">' +
           addable.map(function(s){ return '<button type="button" class="chip" data-mix-add="' + esc(s) + '">' + esc(s) + "</button>"; }).join("") + "</div>" : "");
     }
@@ -1385,7 +1440,7 @@
       // Update only the editor blocks — never the whole view — so the
       // caret in the name field and scroll position stay exactly put.
       if (!formState.mixTouched) {
-        formState.mix = estimateSectorMix(name, formState.cls);
+        formState.mix = roundMixTo100(estimateSectorMix(name, formState.cls));
         var box = document.getElementById("mixEditor");
         if (box) { box.innerHTML = mixEditorInnerHTML(); bindMix(); }
       }
@@ -1427,9 +1482,37 @@
         if (w !== null) formState.curMix[inp.getAttribute("data-curmix")] = w;
       });
     }
+    function updateMixSumUI() {
+      // 内訳の合計をリアルタイム表示する（入力欄は作り直さない）
+      var sum = 0;
+      document.querySelectorAll("[data-mix]").forEach(function(inp) {
+        var w = parseDecimal(inp.value);
+        if (w !== null && w > 0) sum += w;
+      });
+      var sumR = Math.round(sum * 10) / 10;
+      var valEl = document.getElementById("mixSumVal");
+      if (valEl) valEl.textContent = sumR + "%";
+      var line = document.getElementById("mixSumLine");
+      if (line) {
+        var off = Math.abs(sumR - 100) > 0.05;
+        line.innerHTML = "内訳の合計：<b class=\"num\" id=\"mixSumVal\">" + sumR + "%</b>" +
+          (off ? ' <span style="color:var(--danger);font-weight:700">（100%になっていません。計算では割合按分で正規化されますが、そのままだと意図とずれることがあります）</span>'
+               : ' <span style="color:var(--green);font-weight:700">（100%です）</span>');
+      }
+    }
     function bindMix() {
       document.querySelectorAll("[data-mix]").forEach(function(inp) {
-        inp.addEventListener("input", function() { if (formState) formState.mixTouched = true; });
+        inp.addEventListener("input", function() { if (formState) formState.mixTouched = true; updateMixSumUI(); });
+      });
+      document.querySelectorAll("[data-mix-normalize]").forEach(function(btn) {
+        btn.addEventListener("click", function() {
+          if (!formState || !formState.mode) return;
+          captureMixInputs();
+          formState.mixTouched = true;
+          formState.mix = roundMixTo100(formState.mix);
+          var box = document.getElementById("mixEditor");
+          if (box) { box.innerHTML = mixEditorInnerHTML(); bindMix(); }
+        });
       });
       document.querySelectorAll("[data-mix-add]").forEach(function(btn) {
         btn.addEventListener("click", function() {
@@ -1654,6 +1737,13 @@
     // ------------------------------------------------------------------
     // FIRE view
     // ------------------------------------------------------------------
+    function pensionAdjustedText(pen) {
+      if (!pen || !pen.enabled) return "";
+      if (pen.startAge === 65) return "受給開始は65歳のため調整なし：年額 " + fmtYen(pen.adjustedAnnual) + "（月あたり約 " + fmtYen(pen.adjustedAnnual / 12) + "）を、65歳以降の年間支出から差し引きます。";
+      var pctText = (pen.factor >= 1 ? "+" : "−") + Math.abs((pen.factor - 1) * 100).toFixed(1) + "%";
+      var kind = pen.months < 0 ? "繰上げ（1か月あたり−0.4% × " + Math.abs(pen.months) + "か月）" : "繰下げ（1か月あたり＋0.7% × " + pen.months + "か月）";
+      return kind + "で " + pctText + " 調整：65歳時点の年額 " + fmtYen(pen.baseAnnual) + " → " + pen.startAge + "歳から年額 " + fmtYen(pen.adjustedAnnual) + "（月あたり約 " + fmtYen(pen.adjustedAnnual / 12) + "）。" + pen.startAge + "歳以降の年間支出から差し引きます。";
+    }
     function fireFieldHTML(label, key, value, kind, hint) {
       return '<label class="field"><span class="flabel">' + esc(label) + "</span>" +
         '<input class="input num" type="text" inputmode="decimal" data-fire="' + key + '" data-kind="' + kind + '" value="' + esc(value) + '" autocomplete="off">' +
@@ -1663,7 +1753,7 @@
       var f = state.fire;
       var yen = function(v){ return v ? String(v) : ""; };
       var html = '<div class="stack"><section class="card"><h2>FIREシミュレーションの条件</h2>' +
-        '<p class="note" style="margin:0 0 16px">現在の資産は登録データ（' + fmtYen(totalOf(state.assets)) + "）を自動で使います。リターンは毎年一定という単純計算です。必要資産・到達年齢・進捗は「資産が想定寿命（初期値100歳）まで枯渇しない」ことを基準に計算しています（100歳まで持つ前提）。税金・社会保険料は下の「税金・社会保険料」設定で考慮できます（初期状態は考慮する）。公的年金の収入自体は計算に含みません（年金なし＝保守的な目安）。数字は将来の保証ではありません。</p>" +
+        '<p class="note" style="margin:0 0 16px">現在の資産は登録データ（' + fmtYen(totalOf(state.assets)) + "）を自動で使います。リターンは毎年一定という単純計算です。必要資産・到達年齢・進捗は「資産が想定寿命（初期値100歳）まで枯渇しない」ことを基準に計算しています（100歳まで持つ前提）。税金・社会保険料は下の「税金・社会保険料」設定で考慮できます（初期状態は考慮する）。公的年金は下の「公的年金」設定で収入として考慮できます（初期状態は考慮する）。数字は将来の保証ではありません。</p>" +
         fireFieldHTML("現在の年齢（歳）", "currentAge", String(f.currentAge), "int") +
         fireFieldHTML("想定寿命（歳）", "longevityAge", String(f.longevityAge == null ? 100 : f.longevityAge), "int", "初期値は100歳です。この年齢まで資産が持つことを、必要資産・到達年齢・進捗の基準にします。") +
         fireFieldHTML("毎月の積立額（円）", "monthlySaving", yen(f.monthlySaving), "yen", "「21万」のような表記でも入力できます。") +
@@ -1690,6 +1780,21 @@
         "</div>";
       } else {
         html += '<p class="note" style="margin:8px 0 0">現在は考慮していません。下の結果はすべて税・社会保険料を引く前の金額です。オンにすると、パート収入の手取り換算、取り崩し時の譲渡益課税、退職後の国民健康保険料・国民年金保険料・住民税などの負担を反映します。</p>';
+      }
+      html += "</section>";
+      // --- 公的年金 ---
+      var pen = firePensionParams(f);
+      html += '<section class="card"><h2>公的年金</h2>' +
+        '<p class="note" style="margin:0 0 12px">受給開始年齢以降、年間支出から年金収入を差し引いた分だけを取り崩す計算にします。年金額は手取り想定で入力してください（年金自体の税金は別途計算しません）。正確な見込み額は、ねんきん定期便や「ねんきんネット」で確認してください。初期値の年額130万円は、年収550万円程度で40歳ごろまで厚生年金に加入した場合のごく粗い目安です（加入開始年齢や、その後も国民年金保険料を払い続けるかどうかで大きく変わります）。</p>' +
+        '<label class="switch-row"><input type="checkbox" data-fire-pension ' + (f.pensionEnabled ? "checked" : "") + "> 年金収入を考慮する</label>";
+      if (f.pensionEnabled) {
+        html += '<div style="margin-top:10px">' +
+          fireFieldHTML("年金額（65歳時点の見込み年額・手取り想定、円）", "pensionAnnual", String(f.pensionAnnual == null ? 1300000 : f.pensionAnnual), "yen", "65歳で受け取り始めた場合の見込み年額です。「130万」のような表記でも入力できます。") +
+          fireFieldHTML("受給開始年齢（歳）", "pensionStartAge", String(f.pensionStartAge == null ? 65 : f.pensionStartAge), "int", "60〜75歳で入力できます。65歳以外を選ぶと年金額が自動調整されます。") +
+          '<p class="note" style="margin:0" id="pensionAdjustedNote">' + pensionAdjustedText(pen) + "</p>" +
+        "</div>";
+      } else {
+        html += '<p class="note" style="margin:8px 0 0">現在は考慮していません（年金なし＝保守的な目安）。オンにすると、受給開始年齢以降は年金収入でまかなえる分を取り崩しから差し引きます。</p>';
       }
       html += "</section>";
       html += '<div id="fireResults"></div>';
@@ -1754,9 +1859,26 @@
           "<p style=\"margin:0\">完全FIREの到達：考慮前 " + ageText(res0.reachAgeFull) + " → 考慮後 <b>" + ageText(res.reachAgeFull) + "</b> " + ageDiffText(res0.reachAgeFull, res.reachAgeFull) + "</p>" +
           "<p style=\"margin:0\">サイドFIREの到達：考慮前 " + ageText(res0.reachAgeSide) + " → 考慮後 <b>" + ageText(res.reachAgeSide) + "</b> " + ageDiffText(res0.reachAgeSide, res.reachAgeSide) + "</p>" +
           "</div>" +
-          '<p class="note" style="margin-top:10px">公的年金の収入自体は計算に含まない前提は変わりません（上の公的負担は、年金保険料などの「払う側」だけを上乗せしたものです）。</p></section>';
+          '<p class="note" style="margin-top:10px">上の公的負担は、国民健康保険料・国民年金保険料・住民税などの「払う側」です。年金収入（受け取る側）は下の「公的年金」の表示をご覧ください。</p></section>';
       } else {
         html += '<section class="card" style="margin-top:16px"><h2>税金・社会保険料</h2><p class="dim" style="font-size:14px;margin:0;line-height:1.8">税金・社会保険料は考慮していません。上の「税金・社会保険料」設定をオンにすると、手取り換算・取り崩し課税・退職後の公的負担を反映し、考慮前との差も表示します。</p></section>';
+      }
+      // --- 年金の影響（考慮しない場合との比較） ---
+      if (f.pensionEnabled && res.pension && res.pension.adjustedAnnual > 0) {
+        var noPen = Object.assign({}, f, { pensionEnabled: false });
+        var resNP = computeFire(total, noPen);
+        function ageText2(a) { return a !== null ? a + "歳" : "到達しません"; }
+        function targetDiff2(v0, v1) { var d = v1 - v0; return (d >= 0 ? "+" : "−") + fmtYen(Math.abs(d)); }
+        html += '<section class="card" style="margin-top:16px"><h2>公的年金の反映</h2>' +
+          '<p style="font-size:14px;line-height:1.9;margin:0">' + esc(pensionAdjustedText(res.pension)) + "</p>" +
+          '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;font-size:14px;line-height:1.9" class="num">' +
+          "<p style=\"margin:0\">完全FIREの必要資産：年金なし " + fmtYen(resNP.targetFull) + " → 年金あり <b>" + fmtYen(res.targetFull) + "</b>（" + targetDiff2(resNP.targetFull, res.targetFull) + "）</p>" +
+          "<p style=\"margin:0\">サイドFIREの必要資産：年金なし " + fmtYen(resNP.targetSide) + " → 年金あり <b>" + fmtYen(res.targetSide) + "</b>（" + targetDiff2(resNP.targetSide, res.targetSide) + "）</p>" +
+          "<p style=\"margin:0\">完全FIREの到達：年金なし " + ageText2(resNP.reachAgeFull) + " → 年金あり <b>" + ageText2(res.reachAgeFull) + "</b> ／ サイドFIREの到達：年金なし " + ageText2(resNP.reachAgeSide) + " → 年金あり <b>" + ageText2(res.reachAgeSide) + "</b></p>" +
+          "</div>" +
+          '<p class="note" style="margin-top:10px">受給開始年齢より前は年金収入なしで取り崩し額を計算し、開始以降は「年間支出＋公的負担−年金収入（0未満にはしない）」を取り崩し額としています。年金額は手取り想定の入力値で、正確な見込み額はねんきん定期便・ねんきんネットでご確認ください。</p></section>';
+      } else if (!f.pensionEnabled) {
+        html += '<section class="card" style="margin-top:16px"><h2>公的年金</h2><p class="dim" style="font-size:14px;margin:0;line-height:1.8">年金収入は考慮していません（年金なし＝保守的な目安）。上の「公的年金」設定をオンにすると、受給開始年齢以降の取り崩しを年金収入の分だけ差し引いて計算します。</p></section>';
       }
       if (f.crashEnabled) {
         html += '<section class="card" style="margin-top:16px"><h2>到達年に −' + f.crashDropPct + '%の暴落が起きたら</h2>';
@@ -2082,8 +2204,11 @@
           if (key === "currentAge") v = Math.min(100, Math.max(0, Math.round(v)));
           if (key === "sideBurdenRatePct" || key === "nisaPct" || key === "gainSharePct" || key === "withdrawalTaxPct") v = Math.min(100, Math.max(0, v));
           if (key === "longevityAge") v = Math.min(120, Math.max(60, Math.round(v)));
+          if (key === "pensionStartAge") v = Math.min(75, Math.max(60, Math.round(v)));
           state.fire[key] = v;
           saveState();
+          var penNote = document.getElementById("pensionAdjustedNote");
+          if (penNote) penNote.textContent = pensionAdjustedText(firePensionParams(state.fire));
           updateFireResults();
         };
         inp.addEventListener("input", commit);
@@ -2103,6 +2228,14 @@
           state.fire.taxEnabled = taxBox.checked;
           saveState();
           render(); // re-render shows/hides the tax fields
+        });
+      }
+      var pensionBox = document.querySelector("[data-fire-pension]");
+      if (pensionBox) {
+        pensionBox.addEventListener("change", function() {
+          state.fire.pensionEnabled = pensionBox.checked;
+          saveState();
+          render(); // re-render shows/hides the pension fields
         });
       }
       var fileEl = document.getElementById("importFile");
