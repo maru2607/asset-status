@@ -296,25 +296,26 @@
     // ------------------------------------------------------------------
     // Constants (ported from the original finance module)
     // ------------------------------------------------------------------
-    var ASSET_CLASSES = ["株式","債券","不動産","コモディティ","現金","暗号資産","年金","その他"];
+    var ASSET_CLASSES = ["株式","債券","国債","不動産","コモディティ","現金","暗号資産","年金","その他"];
     var CURRENCIES = ["JPY","USD","EUR","GBP","AUD","その他"];
     var SECTORS = ["テクノロジー","ヘルスケア","金融","消費財","エネルギー","素材","公益事業","不動産","通信","資本財","債券","コモディティ","現金","暗号資産","分散","その他"];
     var FIELD_SECTORS = ["テクノロジー","通信","ヘルスケア","金融","消費財","資本財","エネルギー","素材","公益事業","不動産","債券","コモディティ","現金","暗号資産","その他"];
 
     var CLASS_COLORS = {
-      "株式":"#527ca3","債券":"#8fb0d1","不動産":"#c9a36a","コモディティ":"#d3ab3e",
+      "株式":"#527ca3","債券":"#8fb0d1","国債":"#5f8d7a","不動産":"#c9a36a","コモディティ":"#d3ab3e",
       "現金":"#9dbe97","暗号資産":"#cf7d88","年金":"#7ba05b","その他":"#aeb4ba",
       "テクノロジー":"#527ca3","通信":"#5fa39a","ヘルスケア":"#74a95e","金融":"#7d9fc4",
       "消費財":"#d98a94","資本財":"#8496ab","エネルギー":"#df9c4a","素材":"#b08d63",
       "公益事業":"#a8c69f","分散":"#9aa7b1",
-      "JPY":"#7ba05b","USD":"#527ca3","EUR":"#8d84b8","GBP":"#c08d4e","AUD":"#5fa39a"
+      "JPY":"#7ba05b","USD":"#527ca3","EUR":"#8d84b8","GBP":"#c08d4e","AUD":"#5fa39a",
+      "円建て（JPY）":"#7ba05b","ドル建て（USD）":"#527ca3","ユーロ建て（EUR）":"#8d84b8"
     };
     var PALETTE = ["#527ca3","#7ba05b","#d98a94","#8fb0d1","#c9a36a","#a8c69f","#df9c4a","#5fa39a","#8496ab","#b08d63","#8d84b8","#aeb4ba"];
     function colorFor(name, index) {
       return CLASS_COLORS[name] || PALETTE[(index || 0) % PALETTE.length];
     }
 
-    var DEFAULT_TARGETS = {"株式":60,"債券":10,"不動産":5,"コモディティ":5,"現金":10,"暗号資産":5,"年金":5,"その他":0};
+    var DEFAULT_TARGETS = {"株式":60,"債券":10,"国債":0,"不動産":5,"コモディティ":5,"現金":10,"暗号資産":5,"年金":5,"その他":0};
     var DEFAULT_FIRE = {
       currentAge: 32, monthlySaving: 210000, annualReturnPct: 4,
       annualSpending: 0, sideIncome: 0, withdrawalRatePct: 4,
@@ -324,13 +325,13 @@
     var CRASH_SCENARIOS = [
       { id:"lehman", name:"リーマンショック級",
         note:"2008年世界金融危機のピーク→底の下落率を目安にした想定",
-        drops:{"株式":50,"債券":10,"不動産":55,"コモディティ":20,"現金":0,"暗号資産":75,"年金":35} },
+        drops:{"株式":50,"債券":10,"国債":0,"不動産":55,"コモディティ":20,"現金":0,"暗号資産":75,"年金":35} },
       { id:"it", name:"ITバブル崩壊級",
         note:"2000〜2002年の下落を目安にした想定（ハイテク中心に大きく下落）",
-        drops:{"株式":45,"債券":0,"不動産":25,"コモディティ":10,"現金":0,"暗号資産":80,"年金":30} },
+        drops:{"株式":45,"債券":0,"国債":0,"不動産":25,"コモディティ":10,"現金":0,"暗号資産":80,"年金":30} },
       { id:"corona", name:"コロナショック級",
         note:"2020年2〜3月の急落を目安にした想定",
-        drops:{"株式":30,"債券":5,"不動産":35,"コモディティ":15,"現金":0,"暗号資産":50,"年金":20} }
+        drops:{"株式":30,"債券":5,"国債":0,"不動産":35,"コモディティ":15,"現金":0,"暗号資産":50,"年金":20} }
     ];
 
     // ------------------------------------------------------------------
@@ -342,7 +343,11 @@
         result:{ assetClass:"暗号資産", currency:"その他", sector:"暗号資産" } },
       { words:["企業型DC","iDeCo","イデコ","確定拠出年金","企業年金","DC"],
         result:{ assetClass:"年金", currency:"JPY", sector:"分散" } },
-      { words:["預金","普通預金","定期","現金","MRF","MMF","国債","個人向け国債"],
+      { words:["米国債","アメリカ国債","米国国債","トレジャリー"],
+        result:{ assetClass:"債券", currency:"USD", sector:"債券" } },
+      { words:["個人向け国債","国債","国庫債券","利付国債"],
+        result:{ assetClass:"国債", currency:"JPY", sector:"債券" } },
+      { words:["預金","普通預金","定期","現金","MRF","MMF"],
         result:{ assetClass:"現金", currency:"JPY", sector:"現金" } },
       { words:["ゴールド","金","GLD","GLDM","IAU","コモディティ","原油","プラチナ","銀"],
         result:{ assetClass:"コモディティ", currency:"USD", sector:"コモディティ" } },
@@ -419,6 +424,7 @@
       if (has("VTI","全米","米国株式","米国株","アメリカ")) return Object.assign({}, MIX_SP500);
       switch (cls.assetClass) {
         case "債券": return {"債券":100};
+        case "国債": return {"債券":100};
         case "コモディティ": return {"コモディティ":100};
         case "不動産": return {"不動産":100};
         case "暗号資産": return {"暗号資産":100};
@@ -664,15 +670,16 @@
     function normalizeClassName(raw, name) {
       if (typeof raw === "string" && ASSET_CLASSES.indexOf(raw) >= 0) return raw;
       var s = String(raw == null ? "" : raw).toLowerCase().replace(/[\s_\-]/g, "");
-      var map = { stock:"株式", stocks:"株式", equity:"株式", equities:"株式", shares:"株式", bond:"債券", bonds:"債券", fixedincome:"債券", realestate:"不動産", reit:"不動産", property:"不動産", commodity:"コモディティ", commodities:"コモディティ", gold:"コモディティ", cash:"現金", deposit:"現金", savings:"現金", mmf:"現金", money:"現金", crypto:"暗号資産", cryptocurrency:"暗号資産", bitcoin:"暗号資産", virtualcurrency:"暗号資産", pension:"年金", dc:"年金", ideco:"年金", other:"その他", others:"その他", misc:"その他" };
+      var map = { stock:"株式", stocks:"株式", equity:"株式", equities:"株式", shares:"株式", bond:"債券", bonds:"債券", fixedincome:"債券", governmentbond:"国債", governmentbonds:"国債", japanesegovernmentbond:"国債", japanesegovernmentbonds:"国債", jgb:"国債", jgbs:"国債", realestate:"不動産", reit:"不動産", property:"不動産", commodity:"コモディティ", commodities:"コモディティ", gold:"コモディティ", cash:"現金", deposit:"現金", savings:"現金", mmf:"現金", money:"現金", crypto:"暗号資産", cryptocurrency:"暗号資産", bitcoin:"暗号資産", virtualcurrency:"暗号資産", pension:"年金", dc:"年金", ideco:"年金", other:"その他", others:"その他", misc:"その他" };
       if (map[s]) return map[s];
       var jp = String(raw == null ? "" : raw);
       if (jp.indexOf("暗号") >= 0 || jp.indexOf("仮想通貨") >= 0) return "暗号資産";
+      if (jp.indexOf("国債") >= 0) return "国債";
       if (jp.indexOf("債") >= 0) return "債券";
       if (jp.indexOf("不動産") >= 0 || jp.indexOf("リート") >= 0) return "不動産";
       if (jp.indexOf("コモディティ") >= 0) return "コモディティ";
       if (jp.indexOf("年金") >= 0) return "年金";
-      if (jp.indexOf("現金") >= 0 || jp.indexOf("預金") >= 0 || jp.indexOf("国債") >= 0) return "現金";
+      if (jp.indexOf("現金") >= 0 || jp.indexOf("預金") >= 0) return "現金";
       if (jp.indexOf("株") >= 0) return "株式";
       // Unknown / missing class: fall back to the name-based classifier.
       if (name) { var c = classify(name); if (c && c.assetClass) return c.assetClass; }
@@ -694,6 +701,7 @@
       var s = String(raw == null ? "" : raw).toLowerCase().replace(/[\s_\-]/g, "");
       var map = { technology:"テクノロジー", tech:"テクノロジー", healthcare:"ヘルスケア", health:"ヘルスケア", financial:"金融", finance:"金融", financials:"金融", consumer:"消費財", energy:"エネルギー", materials:"素材", utilities:"公益事業", utility:"公益事業", realestate:"不動産", communication:"通信", communications:"通信", telecom:"通信", industrials:"資本財", industrial:"資本財", bond:"債券", bonds:"債券", commodity:"コモディティ", commodities:"コモディティ", cash:"現金", crypto:"暗号資産", diversified:"分散", diversification:"分散", other:"その他", others:"その他" };
       if (map[s]) return map[s];
+      if (cls === "国債") return "債券";
       if (name) { var c3 = classify(name); if (c3 && c3.sector) return c3.sector; }
       if (cls === "債券") return "債券";
       if (cls === "コモディティ") return "コモディティ";
@@ -931,6 +939,36 @@
         '<p class="num" style="margin:6px 0 0;font-size:13px;color:var(--dim)">進捗 ' + fmtPct(progress) + " ／ 必要資産 " + fmtYen(target) +
           (reachAge !== null ? " ／ " + reachAge + "歳で到達見込み" : "") + "</p></div>";
     }
+    // Currency breakdown for the dashboard: group each holding by the
+    // currency set on the holding itself (its purchase currency /
+    // currency exposure), valued in yen. JPY / USD / EUR are shown on
+    // their own; GBP, AUD and anything else are grouped as その他.
+    // All four buckets are always listed (even at ¥0) so the split is
+    // readable at a glance.
+    function currencyDisplaySlices(holdings) {
+      var total = totalOf(holdings);
+      var buckets = { JPY: 0, USD: 0, EUR: 0, OTHER: 0 };
+      holdings.forEach(function(h) {
+        if (h.currency === "JPY") buckets.JPY += h.valueJpy;
+        else if (h.currency === "USD") buckets.USD += h.valueJpy;
+        else if (h.currency === "EUR") buckets.EUR += h.valueJpy;
+        else buckets.OTHER += h.valueJpy;
+      });
+      function pct(v) { return total > 0 ? v / total * 100 : 0; }
+      return [
+        { name: "円建て（JPY）", value: buckets.JPY, pct: pct(buckets.JPY) },
+        { name: "ドル建て（USD）", value: buckets.USD, pct: pct(buckets.USD) },
+        { name: "ユーロ建て（EUR）", value: buckets.EUR, pct: pct(buckets.EUR) },
+        { name: "その他", value: buckets.OTHER, pct: pct(buckets.OTHER) }
+      ];
+    }
+    function currencyCardHTML(holdings, total) {
+      var slices = currencyDisplaySlices(holdings);
+      return '<section class="card"><h2>通貨別の割合（円換算）</h2><div class="donut-flex">' +
+        donutSVG(slices, 168, fmtYen(total), "総資産") +
+        '<div style="flex:1 1 220px">' + sliceListHTML(slices) + "</div></div>" +
+        '<p class="note divider-note">集計の前提：各資産に設定された「通貨」（購入通貨／通貨エクスポージャー）ごとに、円換算の評価額で集計し、総資産に対する割合を表示しています。GBP・AUD・その他は「その他」にまとめています。投資信託・ETFのファンド内部の実質的な通貨配分や、為替ヘッジの有無までは反映していません。通貨は「資産」タブの編集画面で変更できます。</p></section>';
+    }
     function dashboardHTML() {
       var holdings = state.assets;
       if (holdings.length === 0) {
@@ -999,12 +1037,12 @@
           donutSVG(mix.slices, 168, fmtYen(mix.investedTotal), "投資総資産") +
           '<div style="flex:1 1 220px">' + sliceListHTML(mix.slices) + "</div></div>" +
           '<p class="note divider-note">割合は投資総資産（' + fmtYen(mix.investedTotal) + "＝現金クラスを除いた資産の合計）に対する比率です。" +
-          (mix.excludedTotal > 0 ? "預金・国債・MMFなどの現金クラス（" + fmtYen(mix.excludedTotal) + "）は分野に割り当てにくいため対象外にしています。" : "") +
+          (mix.excludedTotal > 0 ? "預金・MMFなどの現金クラス（" + fmtYen(mix.excludedTotal) + "）は分野に割り当てにくいため対象外にしています。国債は「債券」分野として投資総資産に含めています。" : "") +
           "分野の内訳は各資産の推定（または資産の編集画面で設定した内訳）を金額で加重平均したものです。</p></section>";
       }
 
-      // Currency
-      html += '<section class="card"><h2>通貨別の割合</h2>' + sliceListHTML(byCurrency) + "</section>";
+      // Currency (grouped 円建て/ドル建て/ユーロ建て/その他, yen-based)
+      html += currencyCardHTML(holdings, total);
 
       // Simple rule-based comment (no external AI in this static edition)
       html += '<section class="card"><h2>配分のチェック</h2>' + portfolioCommentHTML(byClass, byCurrency, mix) + "</section>";
@@ -1076,13 +1114,13 @@
       var fs = formState;
       return '<section class="card" id="assetForm"><h2>' + (fs.mode === "edit" ? "資産を編集" : "資産を追加") + "</h2>" +
         '<label class="field"><span class="flabel">商品名</span>' +
-          '<input class="input" id="fName" type="text" autocomplete="off" placeholder="例：楽天VYM、オルカン、普通預金" value="' + (asset ? esc(asset.name) : "") + '">' +
+          '<input class="input" id="fName" type="text" autocomplete="off" placeholder="例：楽天VYM、オルカン、普通預金、個人向け国債" value="' + (asset ? esc(asset.name) : "") + '">' +
           '<span class="hint">入力すると資産クラス・通貨・分野を自動判定します（チップで手動選択した項目は上書きされません）。</span></label>' +
         '<label class="field"><span class="flabel">金額（円）</span>' +
           '<input class="input num" id="fValue" type="text" inputmode="decimal" autocomplete="off" placeholder="例：300万、1500000" value="' + (asset ? esc(String(asset.valueJpy)) : "") + '">' +
           '<span class="hint">「300万」のような表記でも入力できます。</span></label>' +
         '<div class="field"><span class="flabel">資産クラス</span>' + chipsHTML("assetClass", ASSET_CLASSES, fs.cls.assetClass) + "</div>" +
-        '<div class="field"><span class="flabel">通貨</span>' + chipsHTML("currency", CURRENCIES, fs.cls.currency) + "</div>" +
+        '<div class="field"><span class="flabel">通貨（購入通貨／エクスポージャー）</span>' + chipsHTML("currency", CURRENCIES, fs.cls.currency) + '<span class="hint">概要タブの「通貨別の割合」は、この通貨ごとに円換算額で集計します。</span></div>' +
         '<div class="field"><span class="flabel">分野（代表）</span>' + chipsHTML("sector", SECTORS, fs.cls.sector) + "</div>" +
         '<div class="field"><span class="flabel">分野の内訳（%）</span>' +
           '<div id="mixEditor">' + mixEditorInnerHTML() + "</div>" +
@@ -1108,12 +1146,13 @@
           var topMix = Object.keys(mix).sort(function(a,b){ return mix[b] - mix[a]; }).slice(0, 3)
             .map(function(k){ return k + " " + Math.round(mix[k]) + "%"; }).join("・");
           var confirmDel = formState && formState.deleteId === h.id;
+          var curLabel = h.currency === "JPY" ? "円建て（JPY）" : h.currency === "USD" ? "ドル建て（USD）" : h.currency === "EUR" ? "ユーロ建て（EUR）" : h.currency;
           return "<li>" +
             '<div class="asset-top"><span class="asset-name">' + esc(h.name) + '</span>' +
               '<span class="asset-value num">' + fmtYen(h.valueJpy) + "</span></div>" +
             '<div class="asset-meta">' +
               '<span class="tag"><span class="dot" style="display:inline-block;background:' + colorFor(h.assetClass, 0) + ';margin-right:5px"></span><b>' + esc(h.assetClass) + "</b></span>" +
-              "<span class=\"tag\">通貨 <b>" + esc(h.currency) + "</b></span>" +
+              "<span class=\"tag\">通貨 <b>" + esc(curLabel) + "</b></span>" +
               "<span class=\"tag\">分野 <b>" + esc(h.sector) + "</b></span>" +
               (topMix ? '<span class="tag">内訳 ' + esc(topMix) + "</span>" : "") +
             "</div>" +
