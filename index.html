@@ -480,16 +480,19 @@
     }
     function fmtPct(v, digits) { return v.toFixed(digits == null ? 1 : digits) + "%"; }
 
-    /** Parse a typed yen amount: full/half-width digits, commas, trailing 万. */
+    /** Parse a typed yen amount: full/half-width digits, commas, trailing 万/億. */
     function parseAmount(raw) {
+      if (typeof raw === "number") return Number.isFinite(raw) && raw >= 0 ? raw : null;
       var normalized = String(raw == null ? "" : raw)
         .replace(/[０-９]/g, function(c){ return String.fromCharCode(c.charCodeAt(0) - 0xfee0); })
-        .replace(/[,、\s円]/g, "");
+        .replace(/[,、\s¥￥円]/g, "");
       if (normalized === "") return null;
-      var man = normalized.endsWith("万");
-      var num = Number(man ? normalized.slice(0, -1) : normalized);
+      var mult = 1;
+      if (normalized.endsWith("億")) { mult = 100000000; normalized = normalized.slice(0, -1); }
+      else if (normalized.endsWith("万")) { mult = 10000; normalized = normalized.slice(0, -1); }
+      var num = Number(normalized);
       if (!Number.isFinite(num) || num < 0) return null;
-      return man ? num * 10000 : num;
+      return num * mult;
     }
     /** Parse a typed decimal (for % fields): keeps "4.5" style input valid. */
     function parseDecimal(raw) {
@@ -626,23 +629,123 @@
     function blankState() {
       return { assets: [], snapshots: [], targets: Object.assign({}, DEFAULT_TARGETS), fire: Object.assign({}, DEFAULT_FIRE) };
     }
+    // ---- Tolerant field picking for imports from other editions ----
+    // The full-stack (Muse) edition and the old Lovable edition do not
+    // always use the exact same key names (valueJpy vs amount/value,
+    // name vs title, holdings vs assets...). Imports must accept those
+    // variants instead of silently dropping every asset.
+    function pickField(obj, keys) {
+      if (!obj || typeof obj !== "object") return { found: false, key: null, value: undefined };
+      for (var i = 0; i < keys.length; i++) {
+        if (Object.prototype.hasOwnProperty.call(obj, keys[i]) && obj[keys[i]] !== null && obj[keys[i]] !== undefined && obj[keys[i]] !== "") {
+          return { found: true, key: keys[i], value: obj[keys[i]] };
+        }
+      }
+      return { found: false, key: null, value: undefined };
+    }
+    var NAME_KEYS = ["name","title","label","productName","product","itemName","item","holdingName","securityName","fundName","displayName","銘柄","商品名","名前","名称"];
+    var TICKER_KEYS = ["ticker","symbol","code","銘柄コード"];
+    var VALUE_KEYS = ["valueJpy","valueJPY","value_jpy","valueYen","amountJpy","amountJPY","amount_jpy","marketValueJpy","currentValueJpy","balanceJpy","valuationJpy","totalJpy","value","amount","balance","currentValue","marketValue","valuation","totalAmount","total","holdingValue","assetValue","評価額","金額","残高","時価評価額","保有額","評価金額"];
+    var VALUE_MAN_KEYS = ["amountMan","valueMan","amountInMan","valueInMan","amountManYen","valueManYen","amountInManYen","valueInManYen","金額万円","万円"];
+    function parseImportedValue(raw) {
+      if (typeof raw === "number") return Number.isFinite(raw) && raw >= 0 ? raw : null;
+      if (typeof raw === "string") {
+        var via = parseAmount(raw);
+        if (via !== null) return via;
+        var n = Number(raw.replace(/[^0-9.\-]/g, ""));
+        return Number.isFinite(n) && n >= 0 ? n : null;
+      }
+      if (raw && typeof raw === "object") {
+        var inner = pickField(raw, VALUE_KEYS.concat(["yen","jpy"]));
+        return inner.found ? parseImportedValue(inner.value) : null;
+      }
+      return null;
+    }
+    function normalizeClassName(raw, name) {
+      if (typeof raw === "string" && ASSET_CLASSES.indexOf(raw) >= 0) return raw;
+      var s = String(raw == null ? "" : raw).toLowerCase().replace(/[\s_\-]/g, "");
+      var map = { stock:"株式", stocks:"株式", equity:"株式", equities:"株式", shares:"株式", bond:"債券", bonds:"債券", fixedincome:"債券", realestate:"不動産", reit:"不動産", property:"不動産", commodity:"コモディティ", commodities:"コモディティ", gold:"コモディティ", cash:"現金", deposit:"現金", savings:"現金", mmf:"現金", money:"現金", crypto:"暗号資産", cryptocurrency:"暗号資産", bitcoin:"暗号資産", virtualcurrency:"暗号資産", pension:"年金", dc:"年金", ideco:"年金", other:"その他", others:"その他", misc:"その他" };
+      if (map[s]) return map[s];
+      var jp = String(raw == null ? "" : raw);
+      if (jp.indexOf("暗号") >= 0 || jp.indexOf("仮想通貨") >= 0) return "暗号資産";
+      if (jp.indexOf("債") >= 0) return "債券";
+      if (jp.indexOf("不動産") >= 0 || jp.indexOf("リート") >= 0) return "不動産";
+      if (jp.indexOf("コモディティ") >= 0) return "コモディティ";
+      if (jp.indexOf("年金") >= 0) return "年金";
+      if (jp.indexOf("現金") >= 0 || jp.indexOf("預金") >= 0 || jp.indexOf("国債") >= 0) return "現金";
+      if (jp.indexOf("株") >= 0) return "株式";
+      // Unknown / missing class: fall back to the name-based classifier.
+      if (name) { var c = classify(name); if (c && c.assetClass) return c.assetClass; }
+      return "その他";
+    }
+    function normalizeCurrencyName(raw, name) {
+      if (typeof raw === "string" && CURRENCIES.indexOf(raw) >= 0) return raw;
+      var s = String(raw == null ? "" : raw).toUpperCase().replace(/[\s]/g, "");
+      if (s === "JPY" || s === "YEN" || s.indexOf("円") >= 0 || s.indexOf("日本") >= 0) return "JPY";
+      if (s === "USD" || s.indexOf("DOLLAR") >= 0 || s.indexOf("ドル") >= 0 || s.indexOf("米") >= 0) return "USD";
+      if (s === "EUR" || s.indexOf("EURO") >= 0 || s.indexOf("ユーロ") >= 0) return "EUR";
+      if (s === "GBP" || s.indexOf("POUND") >= 0 || s.indexOf("ポンド") >= 0) return "GBP";
+      if (s === "AUD") return "AUD";
+      if (name) { var c2 = classify(name); if (c2 && c2.currency) return c2.currency; }
+      return "JPY";
+    }
+    function normalizeSectorName(raw, name, cls) {
+      if (typeof raw === "string" && SECTORS.indexOf(raw) >= 0) return raw;
+      var s = String(raw == null ? "" : raw).toLowerCase().replace(/[\s_\-]/g, "");
+      var map = { technology:"テクノロジー", tech:"テクノロジー", healthcare:"ヘルスケア", health:"ヘルスケア", financial:"金融", finance:"金融", financials:"金融", consumer:"消費財", energy:"エネルギー", materials:"素材", utilities:"公益事業", utility:"公益事業", realestate:"不動産", communication:"通信", communications:"通信", telecom:"通信", industrials:"資本財", industrial:"資本財", bond:"債券", bonds:"債券", commodity:"コモディティ", commodities:"コモディティ", cash:"現金", crypto:"暗号資産", diversified:"分散", diversification:"分散", other:"その他", others:"その他" };
+      if (map[s]) return map[s];
+      if (name) { var c3 = classify(name); if (c3 && c3.sector) return c3.sector; }
+      if (cls === "債券") return "債券";
+      if (cls === "コモディティ") return "コモディティ";
+      if (cls === "不動産") return "不動産";
+      if (cls === "暗号資産") return "暗号資産";
+      if (cls === "現金") return "現金";
+      return "その他";
+    }
     function sanitizeAsset(a) {
-      if (!a || typeof a.name !== "string") return null;
-      var v = Number(a.valueJpy);
-      if (!Number.isFinite(v) || v < 0) return null;
+      if (!a || typeof a !== "object") return null;
+      // Some exports wrap the asset: { asset: {...} } / { holding: {...} }
+      if (!pickField(a, NAME_KEYS.concat(VALUE_KEYS)).found && a.asset && typeof a.asset === "object") a = a.asset;
+      else if (!pickField(a, NAME_KEYS.concat(VALUE_KEYS)).found && a.holding && typeof a.holding === "object") a = a.holding;
+      var namePick = pickField(a, NAME_KEYS);
+      var name = namePick.found ? String(namePick.value).trim() : "";
+      if (!name) {
+        var tick = pickField(a, TICKER_KEYS);
+        if (tick.found) name = String(tick.value).trim();
+      }
+      if (!name) return null;
+      var valPick = pickField(a, VALUE_KEYS);
+      var v = valPick.found ? parseImportedValue(valPick.value) : null;
+      if (v === null) {
+        var manPick = pickField(a, VALUE_MAN_KEYS);
+        if (manPick.found) { var mv = parseImportedValue(manPick.value); if (mv !== null) v = mv * 10000; }
+      }
+      if (v === null && a.quantity != null && a.price != null) {
+        var q = parseImportedValue(a.quantity), pr = parseImportedValue(a.price);
+        if (q !== null && pr !== null) v = q * pr;
+      }
+      if (v === null || !Number.isFinite(v) || v < 0) return null;
+      var clsRaw = pickField(a, ["assetClass","asset_class","class","category","type","assetType","kind","資産クラス","分類","カテゴリ"]);
+      var assetClass = normalizeClassName(clsRaw.found ? clsRaw.value : null, name);
+      var curRaw = pickField(a, ["currency","currencyCode","curr","通貨"]);
+      var currency = normalizeCurrencyName(curRaw.found ? curRaw.value : null, name);
+      var secRaw = pickField(a, ["sector","field","industry","分野","セクター"]);
+      var sector = normalizeSectorName(secRaw.found ? secRaw.value : null, name, assetClass);
+      var swObj = pickField(a, ["sectorWeights","sectorMix","fieldMix","mix","sectorBreakdown","weights"]);
       var sw = {};
-      if (a.sectorWeights && typeof a.sectorWeights === "object") {
-        Object.keys(a.sectorWeights).forEach(function(k) {
-          var w = Number(a.sectorWeights[k]);
+      if (swObj.found && swObj.value && typeof swObj.value === "object" && !Array.isArray(swObj.value)) {
+        Object.keys(swObj.value).forEach(function(k) {
+          var w = Number(swObj.value[k]);
           if (Number.isFinite(w) && w > 0) sw[k] = w;
         });
       }
+      var idPick = pickField(a, ["id"]);
       return {
-        id: typeof a.id === "string" ? a.id : newId(),
-        name: a.name,
-        assetClass: ASSET_CLASSES.indexOf(a.assetClass) >= 0 ? a.assetClass : "その他",
-        currency: CURRENCIES.indexOf(a.currency) >= 0 ? a.currency : "JPY",
-        sector: SECTORS.indexOf(a.sector) >= 0 ? a.sector : "その他",
+        id: idPick.found && typeof idPick.value === "string" ? idPick.value : newId(),
+        name: name,
+        assetClass: assetClass,
+        currency: currency,
+        sector: sector,
         sectorWeights: sw,
         valueJpy: v
       };
@@ -1332,6 +1435,7 @@
     // ------------------------------------------------------------------
     // Data view （記録・データ）
     // ------------------------------------------------------------------
+    var importNotice = null; // {ok:string|null, err:string|null} — survives render()
     function dataHTML() {
       var snaps = state.snapshots;
       var html = '<div class="stack"><section class="card"><h2>資産の推移</h2>';
@@ -1366,7 +1470,9 @@
         '<div class="btn-row"><button type="button" class="btn-primary" data-action="export-json">JSONを書き出す</button>' +
         '<button type="button" class="btn-ghost" data-action="import-json">JSONを読み込む</button>' +
         '<input type="file" id="importFile" accept="application/json,.json" class="hidden" aria-label="読み込むJSONファイル"></div>' +
-        '<p class="msg-ok hidden" id="dataOk" role="status"></p><p class="msg-err hidden" id="dataErr" role="alert"></p>' +
+        '<p class="msg-ok' + (importNotice && importNotice.ok ? '' : ' hidden') + '" id="dataOk" role="status">' + (importNotice && importNotice.ok ? esc(importNotice.ok) : '') + '</p>' +
+        '<p class="msg-err' + (importNotice && importNotice.err ? '' : ' hidden') + '" id="dataErr" role="alert">' + (importNotice && importNotice.err ? esc(importNotice.err) : '') + '</p>' +
+        (importNotice && importNotice.ok ? '<div class="btn-row"><button type="button" class="btn-primary" data-action="go-dashboard">概要で総資産を確認する</button><button type="button" class="btn-ghost" data-action="go-assets">資産一覧を見る</button></div>' : '') +
         '<p class="note divider-note">データはこの端末のブラウザ内にだけ保存されます。機種変更やブラウザのデータ消去に備えて、ときどきJSONで書き出しておくのがおすすめです。</p></section>';
       html += "</div>";
       return html;
@@ -1394,27 +1500,97 @@
       a.remove();
       setTimeout(function(){ URL.revokeObjectURL(url); }, 2000);
     }
+    function importContainers(parsed) {
+      var out = [];
+      if (!parsed || typeof parsed !== "object") return out;
+      out.push(parsed);
+      ["data","export","state","backup","result","payload"].forEach(function(k) {
+        if (parsed[k] && typeof parsed[k] === "object" && !Array.isArray(parsed[k])) out.push(parsed[k]);
+      });
+      return out;
+    }
+    function findImportedArray(parsed, keys) {
+      if (Array.isArray(parsed) && keys.indexOf("assets") >= 0) return { list: parsed, key: "(配列)" };
+      var containers = importContainers(parsed);
+      for (var ci = 0; ci < containers.length; ci++) {
+        for (var ki = 0; ki < keys.length; ki++) {
+          var v = containers[ci][keys[ki]];
+          if (Array.isArray(v)) return { list: v, key: keys[ki] };
+        }
+      }
+      return null;
+    }
+    function findImportedObject(parsed, keys) {
+      var containers = importContainers(parsed);
+      for (var ci = 0; ci < containers.length; ci++) {
+        for (var ki = 0; ki < keys.length; ki++) {
+          var v = containers[ci][keys[ki]];
+          if (v && typeof v === "object" && !Array.isArray(v)) return v;
+        }
+      }
+      return null;
+    }
     function importJSONData(parsed) {
-      if (!parsed || !Array.isArray(parsed.assets)) return { error: "資産データ（assets）が見つからないJSONです。" };
-      var assets = parsed.assets.map(sanitizeAsset).filter(Boolean);
+      // Double-encoded JSON (a JSON string containing JSON) — unwrap once.
+      if (typeof parsed === "string") {
+        try { parsed = JSON.parse(parsed); } catch (e) { return { error: "JSONとして読み取れませんでした。書き出したファイルを選んでください。現在のデータは変更していません。" }; }
+      }
+      if (!parsed || typeof parsed !== "object") return { error: "JSONの内容が空、または形式が想定と違います。現在のデータは変更していません。" };
+      var found = findImportedArray(parsed, ["assets","holdings","items","portfolio","investments","securities","資産"]);
+      if (!found) {
+        var topKeys = Array.isArray(parsed) ? "(配列)" : Object.keys(parsed).slice(0, 12).join("、");
+        return { error: "資産のリストが見つかりませんでした。ファイルに含まれていた項目：" + (topKeys || "なし") + "。資産ダッシュボードで書き出したJSON（assets または holdings の配列を含むもの）を選んでください。現在のデータは変更していません。" };
+      }
+      var rawList = found.list;
+      if (rawList.length === 0) return { error: "資産のリストはありましたが中身が0件でした。もとのアプリで資産が登録された状態で書き出してください。現在のデータは変更していません。" };
+      var assets = [], skipped = 0, firstKeys = "";
+      rawList.forEach(function(raw, idx) {
+        var one = sanitizeAsset(raw);
+        if (one) assets.push(one); else { skipped++; if (idx === 0 && raw && typeof raw === "object") firstKeys = Object.keys(raw).slice(0, 12).join("、"); }
+      });
+      if (assets.length === 0) {
+        return { error: "資産リスト（" + rawList.length + "件）は見つかりましたが、1件も読み取れませんでした。各資産に「商品名（name / title など）」と「金額（valueJpy / amount / value など）」が必要です。1件目の項目：" + (firstKeys || "不明") + "。現在のデータは変更していません。" };
+      }
+      var snapFound = findImportedArray(parsed, ["snapshots","history","records","履歴","記録"]);
       var snaps = [];
-      if (Array.isArray(parsed.snapshots)) {
-        snaps = parsed.snapshots.filter(function(x){ return x && Number.isFinite(Number(x.totalJpy)); }).map(function(x) {
-          return { id: newId(), totalJpy: Number(x.totalJpy),
+      if (snapFound) {
+        snaps = snapFound.list.map(function(x) {
+          if (!x || typeof x !== "object") return null;
+          var totPick = pickField(x, ["totalJpy","totalJPY","total","amount","value","balance","総資産","合計"]);
+          var tot = totPick.found ? parseImportedValue(totPick.value) : null;
+          if (tot === null) return null;
+          var datePick = pickField(x, ["recordedAt","date","createdAt","at","日時","日付"]);
+          return { id: newId(), totalJpy: tot,
                    breakdown: (x.breakdown && typeof x.breakdown === "object") ? x.breakdown : {},
-                   recordedAt: typeof x.recordedAt === "string" ? x.recordedAt : new Date().toISOString() };
-        });
+                   recordedAt: datePick.found && typeof datePick.value === "string" ? datePick.value : new Date().toISOString() };
+        }).filter(Boolean);
       }
       var targets = Object.assign({}, DEFAULT_TARGETS);
-      if (parsed.targets && typeof parsed.targets === "object") {
-        Object.keys(parsed.targets).forEach(function(k) {
-          var v = Number(parsed.targets[k]);
+      var targetsObj = findImportedObject(parsed, ["targets","targetAllocations","allocations","target","目標配分"]);
+      if (targetsObj) {
+        Object.keys(targetsObj).forEach(function(k) {
+          var v = Number(targetsObj[k]);
           if (ASSET_CLASSES.indexOf(k) >= 0 && Number.isFinite(v)) targets[k] = v;
         });
       }
-      state = { assets: assets, snapshots: snaps, targets: targets, fire: sanitizeFire(parsed.fire) };
+      var fireObj = findImportedObject(parsed, ["fire","fireSettings","fireConfig"]) || findImportedObject(parsed, ["settings"]);
+      state = { assets: assets, snapshots: snaps, targets: targets, fire: sanitizeFire(fireObj) };
       saveState();
-      return { assets: assets.length, snapshots: snaps.length };
+      // Verify the save actually landed (guards against blocked storage).
+      var persisted = false;
+      try { var chk = JSON.parse(localStorage.getItem(LS_KEY) || "{}"); persisted = Array.isArray(chk.assets) && chk.assets.length === assets.length; } catch (e) { persisted = false; }
+      return { assets: assets.length, snapshots: snaps.length, skipped: skipped, totalJpy: totalOf(assets), sourceKey: found.key, persisted: persisted };
+    }
+    function readImportFile(file) {
+      if (file && typeof file.text === "function") return file.text();
+      return new Promise(function(resolve, reject) {
+        try {
+          var reader = new FileReader();
+          reader.onload = function() { resolve(String(reader.result || "")); };
+          reader.onerror = function() { reject(reader.error || new Error("read failed")); };
+          reader.readAsText(file);
+        } catch (e) { reject(e); }
+      });
     }
     function recordSnapshot(feedbackEl) {
       var byClass = aggregate(state.assets, "assetClass");
@@ -1539,24 +1715,29 @@
           var file = fileEl.files && fileEl.files[0];
           fileEl.value = "";
           if (!file) return;
-          file.text().then(function(text) {
+          readImportFile(file).then(function(text) {
             var parsed;
-            try { parsed = JSON.parse(text); } catch (e) {
-              showDataMsg(null, "JSONとして読み取れませんでした。書き出したファイルを選んでください。");
+            try { parsed = JSON.parse(String(text || "").replace(/^\uFEFF/, "")); } catch (e) {
+              showDataMsg(null, "JSONとして読み取れませんでした。書き出したファイルを選んでください。現在のデータは変更していません。");
               return;
             }
             var res = importJSONData(parsed);
             if (res.error) { showDataMsg(null, res.error); return; }
             formState = null;
+            var msg = "読み込みが完了しました：資産 " + res.assets + "件（合計 " + fmtYenFull(res.totalJpy) + "）・記録 " + res.snapshots + "件を反映しました。概要タブの総資産と資産一覧に反映されています。";
+            if (res.skipped > 0) msg += " ※" + res.skipped + "件は商品名・金額を読み取れず除外しました。";
+            if (res.persisted === false) msg += " ※この端末への保存を確認できませんでした。ブラウザの保存が制限されている可能性があります。";
+            importNotice = { ok: msg, err: null };
             render();
-            showDataMsg("読み込みが完了しました（資産 " + res.assets + "件・記録 " + res.snapshots + "件）。", null);
+            showDataMsg(msg, null);
           }).catch(function() {
-            showDataMsg(null, "ファイルを読めませんでした。");
+            showDataMsg(null, "ファイルを読めませんでした。現在のデータは変更していません。");
           });
         });
       }
     }
     function showDataMsg(ok, err) {
+      importNotice = { ok: ok || null, err: err || null };
       var okEl = document.getElementById("dataOk");
       var errEl = document.getElementById("dataErr");
       if (okEl) { okEl.textContent = ok || ""; okEl.classList.toggle("hidden", !ok); }
@@ -1570,6 +1751,7 @@
       var action = el.getAttribute("data-action");
       var id = el.getAttribute("data-id");
       if (action === "go-assets") goTab("assets");
+      else if (action === "go-dashboard") goTab("dashboard");
       else if (action === "go-fire") goTab("fire");
       else if (action === "record-snapshot") recordSnapshot(document.getElementById("snapFeedback"));
       else if (action === "add-asset") openForm(null);
