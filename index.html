@@ -1356,12 +1356,35 @@
       } else {
         html += '<ul class="asset-list">' + holdings.map(function(h) {
           var mix = effectiveMix(h);
-          var topMix = Object.keys(mix).sort(function(a,b){ return mix[b] - mix[a]; }).slice(0, 3)
-            .map(function(k){ return k + " " + Math.round(mix[k]) + "%"; }).join("・");
+          // 内訳タグは上位3分野だけだと合計が100%に見えず紛らわしい
+          // （例：S&P500で「テクノロジー30%・消費財14%・金融13%」だけ
+          // 出て残り43%が隠れる）。残りを「ほか」として必ず足し、
+          // 表示上の合計が100%になるようにする。
+          var mixKeys = Object.keys(mix).sort(function(a,b){ return mix[b] - mix[a]; });
+          var topKeys = mixKeys.slice(0, 3);
+          var topVals = topKeys.map(function(k){ return Math.round(mix[k]); });
+          var topMix;
+          if (mixKeys.length > topKeys.length) {
+            var restPct = 100 - topVals.reduce(function(s,v){ return s + v; }, 0);
+            topMix = topKeys.map(function(k, i){ return k + " " + topVals[i] + "%"; }).join("・") +
+              (restPct > 0 ? "・ほか " + restPct + "%" : "");
+          } else {
+            if (topVals.length > 0) {
+              var mixSumR = topVals.reduce(function(s,v){ return s + v; }, 0);
+              if (mixSumR !== 100) topVals[0] += 100 - mixSumR;
+            }
+            topMix = topKeys.map(function(k, i){ return k + " " + topVals[i] + "%"; }).join("・");
+          }
           var confirmDel = formState && formState.deleteId === h.id;
           var exp = effectiveCurrencyExposure(h);
-          var topExp = EXPOSURE_CURRENCIES.filter(function(k){ return exp[k] > 0; }).sort(function(a,b){ return exp[b] - exp[a]; }).slice(0, 3)
-            .map(function(k){ return k + " " + Math.round(exp[k]) + "%"; }).join("・");
+          // 通貨は区分が4つしかないので切り捨てず全件出す（合計100%）。
+          var expKeys = EXPOSURE_CURRENCIES.filter(function(k){ return exp[k] > 0; }).sort(function(a,b){ return exp[b] - exp[a]; });
+          var expVals = expKeys.map(function(k){ return Math.round(exp[k]); });
+          if (expVals.length > 0) {
+            var expSumR = expVals.reduce(function(s,v){ return s + v; }, 0);
+            if (expSumR !== 100) expVals[0] += 100 - expSumR;
+          }
+          var topExp = expKeys.map(function(k, i){ return k + " " + expVals[i] + "%"; }).join("・");
           return "<li>" +
             '<div class="asset-top"><span class="asset-name">' + esc(h.name) + '</span>' +
               '<span class="asset-value num">' + fmtYen(h.valueJpy) + "</span></div>" +
@@ -1379,7 +1402,8 @@
                 : '<button type="button" class="btn-ghost" data-action="ask-delete" data-id="' + h.id + '">削除</button>') +
             "</div></li>";
         }).join("") + "</ul>" +
-        '<p class="num" style="margin:14px 0 0;font-size:14px">合計 <b style="font-size:17px">' + fmtYenFull(totalOf(holdings)) + "</b>（" + holdings.length + "件）</p>";
+        '<p class="num" style="margin:14px 0 0;font-size:14px">合計 <b style="font-size:17px">' + fmtYenFull(totalOf(holdings)) + "</b>（" + holdings.length + "件）</p>" +
+        '<p class="note" style="margin:8px 0 0">各資産の「内訳」は、分野の上位3つと、それ以外をまとめた「ほか」を合わせた表示です（合計100%）。全分野の内訳は「編集」で確認できます。</p>';
       }
       html += "</section>";
       html += targetsHTML();
