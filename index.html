@@ -281,6 +281,22 @@
       .restore-card { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; }
       .restore-card .btn-ghost { flex: 0 0 auto; }
       svg text { font-family: inherit; }
+
+      /* ---------- Advice / AI summary ---------- */
+      .advice-group { margin-top: 16px; }
+      .advice-group:first-of-type { margin-top: 4px; }
+      .advice-heading { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 700; margin: 0 0 8px; }
+      .advice-dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 10px; }
+      .advice-list { list-style: none; margin: 0; padding: 0; }
+      .advice-list li { display: flex; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--border); font-size: 14px; line-height: 1.75; }
+      .advice-list li:last-child { border-bottom: 0; padding-bottom: 2px; }
+      .advice-mark { flex: 0 0 auto; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 800; margin-top: 2px; }
+      .advice-mark-good { background: var(--green-soft); color: var(--green); }
+      .advice-mark-warn { background: #fbf0d9; color: #8a6414; }
+      @media (prefers-color-scheme: dark) { .advice-mark-warn { background: #3d3423; color: var(--amber); } }
+      .summary-preview { margin-top: 14px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+      .summary-preview summary { cursor: pointer; padding: 10px 14px; font-size: 14px; font-weight: 600; min-height: 2.25rem; }
+      .summary-preview pre { margin: 0; padding: 0 14px 14px; white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit; font-size: 13px; line-height: 1.8; color: var(--text); max-height: 420px; overflow: auto; }
     </style>
   </head>
   <body>
@@ -1422,25 +1438,298 @@
       // Currency (grouped 円建て/ドル建て/ユーロ建て/その他, yen-based)
       html += currencyCardHTML(holdings, total);
 
-      // Simple rule-based comment (no external AI in this static edition)
-      html += '<section class="card"><h2>配分のチェック</h2>' + portfolioCommentHTML(byClass, byCurrency, mix) + "</section>";
+      // Rule-based advice (no external AI in this static edition)
+      html += '<section class="card"><h2>アドバイス</h2>' + adviceHTML(byClass, byCurrency, mix, fireRes, total) + "</section>";
+
+      // AI consultation summary (copy & paste into a chat)
+      html += '<section class="card"><h2>AIに相談する</h2>' +
+        '<p class="dim" style="font-size:14px;line-height:1.8;margin:0">いま登録されている資産・目標配分・FIREの条件を文章にまとめます。下のボタンでコピーして、チャットなどに貼ると、内容をもとに相談できます。コピーされるのはこの端末の中で作った要約だけで、データが自動でどこかへ送信されることはありません。</p>' +
+        '<div class="btn-row"><button type="button" class="btn-primary" data-action="copy-ai-summary">AI相談用の要約をコピー</button>' +
+        '<span class="small" id="aiCopyFeedback" role="status" style="align-self:center"></span></div>' +
+        '<details class="summary-preview"><summary>要約の内容を確認する</summary><pre id="aiSummaryPreview">' + esc(buildAiSummaryText()) + "</pre></details>" +
+        '<p class="note" style="margin-top:10px">貼る前に、気になる点や聞きたいことを1〜2行書き足すと、より具体的な返事がもらいやすくなります（例：「リバランスすべき？」「サイドFIREを早めるには？」）。</p></section>';
       html += "</div>";
       return html;
     }
-    function portfolioCommentHTML(byClass, byCurrency, mix) {
-      var lines = [];
-      var top = byClass[0];
-      if (top) lines.push("最大の資産クラスは「" + top.name + "」で全体の " + fmtPct(top.pct) + " を占めています。");
-      var foreign = byCurrency.filter(function(s){ return s.name !== "円（JPY）"; })
-        .reduce(function(s,x){ return s + x.pct; }, 0);
-      if (foreign > 0) lines.push("外貨への実質エクスポージャーは " + fmtPct(foreign) + "（購入通貨ではなく内訳ベース）。円高になると円換算額が目減りする点は「暴落・為替」タブで確認できます。");
-      var cash = byClass.find(function(s){ return s.name === "現金"; });
-      if (cash && cash.pct >= 20) lines.push("現金クラスが " + fmtPct(cash.pct) + " と厚めです。生活防衛資金として十分なら、余剰分の扱いを検討してもよい水準です。");
-      if (mix.slices.length > 0) lines.push("分野では「" + mix.slices[0].name + "」が投資総資産の " + fmtPct(mix.slices[0].pct) + " と最大です。");
-      if (lines.length === 0) lines.push("特筆すべき偏りは見当たりません。");
-      return '<ul style="margin:0;padding-left:20px;font-size:14px;line-height:1.9">' +
-        lines.map(function(l){ return "<li>" + esc(l) + "</li>"; }).join("") + "</ul>" +
-        '<p class="note" style="margin-top:10px">配分比率から機械的に生成している簡易コメントです。投資判断の材料ではなく、見直しのきっかけとしてご覧ください。</p>';
+    // 目標配分を合計100%へ換算した値（%）で返す。合計が0なら null。
+    function normalizedTargets() {
+      var sum = ASSET_CLASSES.reduce(function(s,c){ return s + (Number(state.targets[c]) || 0); }, 0);
+      if (!(sum > 0)) return null;
+      var out = {};
+      ASSET_CLASSES.forEach(function(c){ out[c] = (Number(state.targets[c]) || 0) / sum * 100; });
+      return { map: out, rawSum: sum };
+    }
+    function classPctMap(byClass) {
+      var m = {};
+      byClass.forEach(function(s){ m[s.name] = s.pct; });
+      return m;
+    }
+    function classValMap(byClass) {
+      var m = {};
+      byClass.forEach(function(s){ m[s.name] = s.value; });
+      return m;
+    }
+    function signedPct(v) { return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "%"; }
+    function signedPoint(v) { return (v >= 0 ? "+" : "−") + Math.abs(v).toFixed(1) + "ポイント"; }
+
+    // ----------------------------------------------------------------
+    // ルールベースの簡易アドバイス
+    // 登録データだけから機械的に判定する。根拠の数字を必ず添え、
+    // データがない・未設定の項目については何も出さない。
+    // ----------------------------------------------------------------
+    function buildAdvice(byClass, byCurrency, mix, fireRes, total) {
+      var good = [], warn = [];
+      var pctOf = classPctMap(byClass), valOf = classValMap(byClass);
+      function pct(name) { return pctOf[name] || 0; }
+
+      // --- 目標配分との乖離（±5ポイント以上を「大きい」とする） ---
+      var nt = normalizedTargets();
+      if (nt) {
+        var diffs = ASSET_CLASSES.map(function(c) {
+          return { name: c, target: nt.map[c], current: pct(c), diff: pct(c) - nt.map[c] };
+        }).filter(function(d){ return d.target > 0 || d.current > 0; });
+        var big = diffs.filter(function(d){ return Math.abs(d.diff) >= 5; })
+          .sort(function(a,b){ return Math.abs(b.diff) - Math.abs(a.diff); });
+        big.slice(0, 3).forEach(function(d) {
+          warn.push("「" + d.name + "」が目標 " + fmtPct(d.target) + " に対して現在 " + fmtPct(d.current) + " と、" + signedPoint(d.diff) + " ずれている。" +
+            (d.diff > 0 ? "目標より厚くなっているので、買い増しを控える・一部を他へ回すなどの調整候補。" : "目標より薄いので、買い増し候補として検討できる。"));
+        });
+        if (big.length === 0 && diffs.length > 0) {
+          var maxDiff = Math.max.apply(null, diffs.map(function(d){ return Math.abs(d.diff); }));
+          good.push("目標配分との乖離は最大でも " + maxDiff.toFixed(1) + "ポイント（目安の±5ポイント以内）で、全体として目標に近い配分になっている。");
+        }
+      }
+
+      // --- 現金比率 ---
+      var cashPct = pct("現金"), cashVal = valOf["現金"] || 0;
+      if (cashVal > 0 || cashPct > 0) {
+        if (cashPct >= 25) {
+          warn.push("現金が " + fmtYen(cashVal) + "（全体の " + fmtPct(cashPct) + "）と厚め。生活費の備えとして十分な額を超えている分は、置いておく間の機会損失も意識したい水準。");
+        } else if (cashPct < 5) {
+          warn.push("現金は " + fmtYen(cashVal) + "（全体の " + fmtPct(cashPct) + "）と薄め。急な出費や暴落時の買い増しに回せる余力が小さい。");
+        } else {
+          good.push("現金は " + fmtYen(cashVal) + "（全体の " + fmtPct(cashPct) + "）あり、手元資金として一定の厚みを保ちながら投資にも回せている。");
+        }
+      } else {
+        warn.push("現金クラスの資産が登録されていない（0%）。急な出費への備えが別にあるか、一度確認しておきたい。");
+      }
+
+      // --- 実質通貨の集中 ---
+      var curSorted = byCurrency.slice().sort(function(a,b){ return b.pct - a.pct; });
+      var topCur = curSorted[0];
+      var usd = byCurrency.find(function(s){ return s.name === "米ドル（USD）"; });
+      var eur = byCurrency.find(function(s){ return s.name === "ユーロ（EUR）"; });
+      var jpy = byCurrency.find(function(s){ return s.name === "円（JPY）"; });
+      if (usd && usd.pct >= 80) {
+        warn.push("実質通貨は米ドルが " + fmtPct(usd.pct) + "（" + fmtYen(usd.value) + "）と80%以上に集中。円高が進むと円換算の総資産が大きく目減りしやすい（影響は「暴落・為替」タブで試算できる）。");
+      } else if (topCur && topCur.pct >= 80) {
+        warn.push("実質通貨は「" + topCur.name + "」が " + fmtPct(topCur.pct) + "（" + fmtYen(topCur.value) + "）と80%以上に集中している。");
+      } else if (topCur) {
+        var spread = byCurrency.filter(function(s){ return s.pct >= 5; }).length;
+        if (spread >= 3) {
+          good.push("実質通貨は最大でも「" + topCur.name + "」の " + fmtPct(topCur.pct) + " で、" + spread + "つの通貨区分に5%以上ずつ分散している" +
+            (usd && eur && jpy ? "（円 " + fmtPct(jpy.pct) + "／米ドル " + fmtPct(usd.pct) + "／ユーロ " + fmtPct(eur.pct) + "）。" : "。"));
+        } else if (usd && usd.pct >= 60) {
+          warn.push("実質通貨は米ドルが " + fmtPct(usd.pct) + "（" + fmtYen(usd.value) + "）とやや高め。円高局面では円換算額が下がりやすい点は意識しておきたい。");
+        }
+      }
+
+      // --- 分野の偏り（投資総資産＝現金以外が分母） ---
+      if (mix && mix.slices.length > 0) {
+        var topSec = mix.slices[0];
+        if (topSec.pct >= 40) {
+          warn.push("分野では「" + topSec.name + "」が投資総資産の " + fmtPct(topSec.pct) + "（" + fmtYen(topSec.value) + "）と40%以上を占め、その分野の値動きに全体が左右されやすい。");
+        } else if (mix.slices.length >= 4 && topSec.pct < 30) {
+          good.push("分野は最大の「" + topSec.name + "」でも投資総資産の " + fmtPct(topSec.pct) + " で、" + mix.slices.length + "分野に分散している。");
+        } else {
+          // 中間帯は断定せず、最大分野だけ事実として「良い点」側に置かない。
+          // 数字の提示は要約側で行うため、ここでは何も出さない。
+        }
+        var tech = mix.slices.find(function(s){ return s.name === "テクノロジー"; });
+        if (tech && tech.pct >= 35 && topSec.name !== "テクノロジー") {
+          warn.push("「テクノロジー」分野も投資総資産の " + fmtPct(tech.pct) + " と大きめで、ハイテク株の値動きの影響を受けやすい。");
+        }
+      }
+
+      // --- 守りの資産（債券・国債・現金）の有無 ---
+      var defensivePct = pct("債券") + pct("国債") + pct("現金");
+      var defensiveVal = (valOf["債券"] || 0) + (valOf["国債"] || 0) + (valOf["現金"] || 0);
+      var bondGovPct = pct("債券") + pct("国債");
+      if ((valOf["債券"] || 0) + (valOf["国債"] || 0) > 0) {
+        if (defensivePct >= 15) {
+          good.push("債券・国債・現金の「守り」の資産が合計 " + fmtYen(defensiveVal) + "（全体の " + fmtPct(defensivePct) + "、うち債券・国債 " + fmtPct(bondGovPct) + "）あり、暴落時の下げ幅を和らげるクッションがある。");
+        }
+      } else if (pct("株式") >= 70) {
+        warn.push("債券・国債が登録されておらず（0%）、株式が " + fmtPct(pct("株式")) + " を占める攻めの配分。暴落時は総資産の下げ幅が大きくなりやすい（目安は「暴落・為替」タブで確認できる）。");
+      }
+
+      // --- 暗号資産の比率 ---
+      var cryptoPct = pct("暗号資産");
+      if (cryptoPct >= 10) {
+        warn.push("暗号資産が全体の " + fmtPct(cryptoPct) + "（" + fmtYen(valOf["暗号資産"] || 0) + "）と1割以上。値動きが特に大きい資産なので、想定より比率が膨らんでいないか定期的に見直したい。");
+      }
+
+      // --- FIRE進捗 ---
+      if (fireRes) {
+        var f = state.fire;
+        if (fireRes.reachAgeSide !== null && fireRes.progressSide >= 50) {
+          good.push("サイドFIREは進捗 " + fmtPct(fireRes.progressSide) + "（必要資産 " + fmtYen(fireRes.targetSide) + " に対して現在 " + fmtYen(total) + "）で、" + fireRes.reachAgeSide + "歳到達の見込み。折り返しを過ぎている。");
+        } else if (fireRes.reachAgeFull !== null) {
+          good.push("今の積立（月 " + fmtYen(f.monthlySaving) + "・想定リターン " + fmtPct(f.annualReturnPct) + "）を続けると、完全FIREは " + fireRes.reachAgeFull + "歳・サイドFIREは " + (fireRes.reachAgeSide !== null ? fireRes.reachAgeSide + "歳" : "到達見込みなし") + " の見込み（進捗：完全 " + fmtPct(fireRes.progressFull) + "／サイド " + fmtPct(fireRes.progressSide) + "）。");
+        }
+        if (fireRes.reachAgeFull === null) {
+          warn.push("完全FIREは " + fireRes.longevityAge + "歳までに到達しない見込み（必要資産 " + fmtYen(fireRes.targetFull) + " に対して現在 " + fmtYen(total) + "・進捗 " + fmtPct(fireRes.progressFull) + "）。年間支出 " + fmtYen(f.annualSpending) + " の見直し、積立額、パート収入（サイドFIRE）の活用が効くポイント。");
+        } else if (fireRes.progressFull < 20 && fireRes.reachAgeSide === null) {
+          warn.push("FIREの進捗は完全 " + fmtPct(fireRes.progressFull) + "・サイド " + fmtPct(fireRes.progressSide) + " で、まだ距離がある段階。まずサイドFIRE側の到達見込みを作れるかが焦点になる。");
+        }
+      }
+      return { good: good, warn: warn };
+    }
+    function adviceListHTML(items, kind) {
+      if (items.length === 0) {
+        return '<p class="dim" style="font-size:14px;margin:0">' + (kind === "good" ? "いまの登録データからは、特筆できる点はまだありません。" : "いまの登録データからは、目立つ偏りは見つかりませんでした。") + "</p>";
+      }
+      var mark = kind === "good" ? "○" : "!";
+      return '<ul class="advice-list">' + items.map(function(t) {
+        return '<li><span class="advice-mark ' + (kind === "good" ? "advice-mark-good" : "advice-mark-warn") + '" aria-hidden="true">' + mark + "</span><span>" + esc(t) + "</span></li>";
+      }).join("") + "</ul>";
+    }
+    function adviceHTML(byClass, byCurrency, mix, fireRes, total) {
+      var adv = buildAdvice(byClass, byCurrency, mix, fireRes, total);
+      return '<div class="advice-group"><p class="advice-heading"><span class="advice-dot" style="background:var(--green)"></span>良い点</p>' + adviceListHTML(adv.good, "good") + "</div>" +
+        '<div class="advice-group"><p class="advice-heading"><span class="advice-dot" style="background:var(--amber)"></span>気になる点</p>' + adviceListHTML(adv.warn, "warn") + "</div>" +
+        '<p class="note divider-note">これはAIではなく、登録データに決まった基準（目標配分との差±5ポイント、現金比率、単一通貨80%以上、単一分野40%以上など）を当てたルールベースの目安です。分野・実質通貨の内訳は商品名などからの推定値ベースのため、実際の構成とはずれることがあります。投資判断そのものではなく、見直しのきっかけとしてご覧ください。</p>';
+    }
+
+    // ----------------------------------------------------------------
+    // AI相談用の要約テキスト
+    // チャット等に貼って相談できるよう、主要な数字を文章でまとめる。
+    // 金額は円表記（フル桁＋万円併記）、割合は小数第1位まで。
+    // ----------------------------------------------------------------
+    function yenText(v) { return fmtYenFull(v); }
+    function buildAiSummaryText() {
+      var holdings = state.assets;
+      var total = totalOf(holdings);
+      var byClass = aggregate(holdings, "assetClass");
+      var byCurrency = currencyDisplaySlices(holdings);
+      var mix = aggregateSectorMix(holdings);
+      var f = state.fire;
+      var fireRes = f.annualSpending > 0 ? computeFire(total, f) : null;
+      var today = new Date().toLocaleDateString("ja-JP", { year: "numeric", month: "long", day: "numeric" });
+      var L = [];
+      L.push("【資産の相談】資産ダッシュボードの要約（" + today + "時点）");
+      L.push("以下の内容をもとに、配分やFIRE計画へのアドバイスをお願いします。");
+      L.push("");
+      L.push("■ 総資産");
+      L.push("総資産：" + yenText(total) + "（資産 " + holdings.length + "件）");
+      L.push("");
+      L.push("■ 資産クラス別");
+      byClass.forEach(function(s){ L.push("・" + s.name + "：" + yenText(s.value) + "（" + fmtPct(s.pct) + "）"); });
+      L.push("");
+      L.push("■ 実質通貨別（中身ベースのエクスポージャー推定）");
+      byCurrency.forEach(function(s){ L.push("・" + s.name + "：" + yenText(s.value) + "（" + fmtPct(s.pct) + "）"); });
+      if (mix.slices.length > 0) {
+        L.push("");
+        L.push("■ 分野別（投資総資産 " + yenText(mix.investedTotal) + " に対する割合・上位）");
+        mix.slices.slice(0, 6).forEach(function(s){ L.push("・" + s.name + "：" + yenText(s.value) + "（" + fmtPct(s.pct) + "）"); });
+        if (mix.slices.length > 6) {
+          var restPct = mix.slices.slice(6).reduce(function(s,x){ return s + x.pct; }, 0);
+          L.push("・その他 " + (mix.slices.length - 6) + "分野 合計（" + fmtPct(restPct) + "）");
+        }
+      }
+      var nt = normalizedTargets();
+      if (nt) {
+        var pctOf = classPctMap(byClass);
+        var diffs = ASSET_CLASSES.map(function(c) {
+          var cur = pctOf[c] || 0;
+          return { name: c, target: nt.map[c], current: cur, diff: cur - nt.map[c] };
+        }).filter(function(d){ return d.target > 0 || d.current > 0; })
+          .sort(function(a,b){ return Math.abs(b.diff) - Math.abs(a.diff); });
+        var mainDiffs = diffs.filter(function(d){ return Math.abs(d.diff) >= 1; }).slice(0, 5);
+        L.push("");
+        L.push("■ 目標配分との差（目標は合計100%に換算）");
+        if (mainDiffs.length > 0) {
+          mainDiffs.forEach(function(d){ L.push("・" + d.name + "：目標 " + fmtPct(d.target) + "／現在 " + fmtPct(d.current) + "／差 " + signedPoint(d.diff)); });
+        } else {
+          L.push("・目標と現在はほぼ一致しています（差はいずれも1ポイント未満）。");
+        }
+      }
+      L.push("");
+      L.push("■ FIREの条件と結果");
+      L.push("・現在の年齢：" + f.currentAge + "歳／想定寿命：" + fireLongevityAge(f) + "歳まで資産が持つ前提");
+      L.push("・毎月の積立：" + yenText(f.monthlySaving) + "／想定リターン：年 " + fmtPct(f.annualReturnPct) + "／インフレ率：年 " + fmtPct(f.inflationPct));
+      if (f.annualSpending > 0) {
+        L.push("・年間支出：" + yenText(f.annualSpending) + "／取り崩し率（参考）：" + fmtPct(f.withdrawalRatePct));
+        if (f.sideIncome > 0) L.push("・サイドFIRE後のパート収入（額面・年額）：" + yenText(f.sideIncome));
+        if (fireRes) {
+          L.push("・完全FIRE：必要資産 " + yenText(fireRes.targetFull) + "／進捗 " + fmtPct(fireRes.progressFull) + "／到達見込み " + (fireRes.reachAgeFull !== null ? fireRes.reachAgeFull + "歳（あと" + fireRes.yearsFull + "年）" : fireRes.longevityAge + "歳までに到達しない見込み"));
+          L.push("・サイドFIRE：必要資産 " + yenText(fireRes.targetSide) + "／進捗 " + fmtPct(fireRes.progressSide) + "／到達見込み " + (fireRes.reachAgeSide !== null ? fireRes.reachAgeSide + "歳（あと" + fireRes.yearsSide + "年）" : fireRes.longevityAge + "歳までに到達しない見込み"));
+        }
+      } else {
+        L.push("・年間支出：未入力（FIREの到達計算は未実施）");
+      }
+      // 税金・年金の前提（要点のみ）
+      var tax = fireTaxParams(f), pen = firePensionParams(f);
+      if (f.taxEnabled) {
+        L.push("・税金・社会保険料：考慮する。取り崩し課税は「取り崩し額×非NISA割合" + fmtPct(tax.nonNisaPct) + "×利益部分の割合" + fmtPct(tax.gainSharePct) + "×税率" + fmtPct(tax.withdrawalTaxPct, 3) + "」（実効の目減り約" + fmtPct(tax.dragRate * 100, 2) + "、NISA分は非課税）。パート収入の実効負担率 " + fmtPct(tax.sideBurdenRatePct) + "、退職後の公的負担は年 " + yenText(tax.burden) + " を支出に上乗せ。");
+      } else {
+        L.push("・税金・社会保険料：考慮しない設定。");
+      }
+      if (pen.enabled && pen.adjustedAnnual > 0) {
+        L.push("・公的年金：考慮する。65歳時点の見込み年額 " + yenText(pen.baseAnnual) + " を、受給開始 " + pen.startAge + "歳に合わせて調整した年額 " + yenText(Math.round(pen.adjustedAnnual)) + " を、開始年齢以降の支出から差し引く前提。");
+      } else {
+        L.push("・公的年金：考慮しない設定（年金なしの保守的な前提）。");
+      }
+      var snaps = state.snapshots;
+      if (snaps.length > 0) {
+        var latest = snaps[snaps.length - 1];
+        var d = new Date(latest.recordedAt).toLocaleDateString("ja-JP");
+        var deltaNow = total - latest.totalJpy;
+        L.push("");
+        L.push("■ 直近の推移");
+        L.push("・最新記録（" + d + "）：" + yenText(latest.totalJpy) + " → 現在 " + yenText(total) + "（" + (deltaNow >= 0 ? "+" : "−") + yenText(Math.abs(deltaNow)).replace("円", "") + "円）");
+        if (snaps.length >= 2) {
+          var prev = snaps[snaps.length - 2];
+          var d2 = new Date(prev.recordedAt).toLocaleDateString("ja-JP");
+          var deltaPrev = latest.totalJpy - prev.totalJpy;
+          L.push("・その前（" + d2 + "）：" + yenText(prev.totalJpy) + " → 最新記録まで " + (deltaPrev >= 0 ? "+" : "−") + yenText(Math.abs(deltaPrev)).replace("円", "") + "円");
+        }
+        L.push("・記録は合計 " + snaps.length + "件");
+      }
+      L.push("");
+      L.push("※分野・実質通貨の内訳は推定値ベースです。気になる点や聞きたいことがあれば、この下に書き足してください。");
+      return L.join("\n");
+    }
+    function copyAiSummary() {
+      var text = buildAiSummaryText();
+      var fb = document.getElementById("aiCopyFeedback");
+      function done(ok, msg) {
+        if (fb) { fb.textContent = msg; fb.style.color = ok ? "var(--green)" : "var(--danger)"; fb.style.fontWeight = "700"; }
+        var pre = document.getElementById("aiSummaryPreview");
+        if (pre) pre.textContent = text;
+      }
+      function fallback() {
+        try {
+          var ta = document.createElement("textarea");
+          ta.value = text;
+          ta.setAttribute("readonly", "");
+          ta.style.position = "fixed"; ta.style.opacity = "0"; ta.style.top = "0";
+          document.body.appendChild(ta);
+          ta.select(); ta.setSelectionRange(0, ta.value.length);
+          var ok = false;
+          try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+          ta.remove();
+          if (ok) done(true, "コピーしました。チャットに貼って相談できます。");
+          else done(false, "コピーできませんでした。「要約の内容を確認する」を開いて手動でコピーしてください。");
+        } catch (e) {
+          done(false, "コピーできませんでした。「要約の内容を確認する」を開いて手動でコピーしてください。");
+        }
+      }
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        navigator.clipboard.writeText(text).then(function(){ done(true, "コピーしました。チャットに貼って相談できます。"); }, fallback);
+      } else {
+        fallback();
+      }
     }
     </script>
     <script>
@@ -2522,6 +2811,7 @@
         state.snapshots = state.snapshots.filter(function(x){ return x.id !== id; });
         formState = null; saveState(); render();
       }
+      else if (action === "copy-ai-summary") copyAiSummary();
       else if (action === "export-json") exportJSON();
       else if (action === "import-json") {
         var f = document.getElementById("importFile");
