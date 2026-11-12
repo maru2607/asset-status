@@ -169,11 +169,11 @@
       /* ---------- Lists / slices ---------- */
       .slice-list { list-style: none; margin: 16px 0 0; padding: 0; }
       .slice-list li { padding: 7px 0; }
-      .slice-head { display: flex; align-items: baseline; gap: 8px; font-size: 14px; }
+      .slice-head { display: flex; align-items: baseline; gap: 8px; font-size: 14px; flex-wrap: wrap; }
       .dot { width: 10px; height: 10px; border-radius: 3px; flex: 0 0 10px; align-self: center; }
       .slice-name { font-weight: 500; }
-      .slice-val { margin-left: auto; font-weight: 700; }
-      .slice-pct { color: var(--dim); font-size: 13px; min-width: 52px; text-align: right; }
+      .slice-val { margin-left: auto; font-weight: 700; white-space: nowrap; }
+      .slice-pct { color: var(--dim); font-size: 13px; min-width: 58px; text-align: right; white-space: nowrap; }
       .bar-track { height: 6px; border-radius: 3px; background: var(--surface-2); margin-top: 5px; overflow: hidden; }
       .bar-fill { height: 100%; border-radius: 3px; }
 
@@ -196,7 +196,7 @@
       .asset-list { list-style: none; margin: 0; padding: 0; }
       .asset-list li { padding: 14px 0; border-bottom: 1px solid var(--border); }
       .asset-list li:last-child { border-bottom: 0; padding-bottom: 2px; }
-      .asset-top { display: flex; align-items: baseline; gap: 10px; }
+      .asset-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
       .asset-name { font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
       .asset-value { margin-left: auto; font-weight: 800; font-size: 17px; white-space: nowrap; }
       .asset-meta { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; align-items: center; }
@@ -248,7 +248,7 @@
       .slider-head .val { font-weight: 700; white-space: nowrap; }
       input[type="range"] { width: 100%; accent-color: var(--accent); min-height: 2.25rem; }
       .sim-compare { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: end; margin: 6px 0 4px; }
-      .sim-compare .amt { font-size: 24px; font-weight: 800; line-height: 1.2; }
+      .sim-compare .amt { font-size: clamp(19px, 5.4vw, 24px); font-weight: 800; line-height: 1.25; overflow-wrap: anywhere; }
       .sim-arrow { color: var(--dim); font-size: 18px; padding-bottom: 4px; }
       .cmp-row { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 14px; }
       .cmp-row:last-child { border-bottom: 0; }
@@ -260,8 +260,8 @@
       .fire-grid { display: grid; gap: 16px; }
       @media (min-width: 640px) { .fire-grid { grid-template-columns: 1fr 1fr; } }
       .fire-stat-label { font-size: 13px; font-weight: 700; color: var(--dim); }
-      .fire-big { font-size: 30px; font-weight: 800; line-height: 1.25; }
-      .fire-mid { font-size: 19px; font-weight: 800; line-height: 1.3; }
+      .fire-big { font-size: clamp(24px, 6.8vw, 30px); font-weight: 800; line-height: 1.25; overflow-wrap: anywhere; }
+      .fire-mid { font-size: 19px; font-weight: 800; line-height: 1.3; overflow-wrap: anywhere; }
       .switch-row { display: flex; align-items: center; gap: 10px; font-size: 14px; font-weight: 500; padding: 6px 0; }
       .switch-row input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--accent); flex: 0 0 auto; }
 
@@ -581,20 +581,13 @@
     // ------------------------------------------------------------------
     // Formatting / parsing
     // ------------------------------------------------------------------
+    // 金額表示は丸めない：万円・億円への換算はせず、円単位まで
+    // 桁区切りつきで正確に表示する（端数は円単位にそろえるのみ）。
     function fmtYen(v) {
-      var sign = v < 0 ? "−" : "";
-      var abs = Math.abs(Math.round(v));
-      if (abs >= 100000000) {
-        var oku = abs / 100000000;
-        return sign + (oku >= 100 ? Math.round(oku).toLocaleString("ja-JP") : oku.toFixed(2)) + "億円";
-      }
-      if (abs >= 10000) return sign + Math.round(abs / 10000).toLocaleString("ja-JP") + "万円";
-      return sign + abs.toLocaleString("ja-JP") + "円";
-    }
-    function fmtYenFull(v) {
       var sign = v < 0 ? "−" : "";
       return sign + Math.abs(Math.round(v)).toLocaleString("ja-JP") + "円";
     }
+    function fmtYenFull(v) { return fmtYen(v); }
     function fmtPct(v, digits) { return v.toFixed(digits == null ? 1 : digits) + "%"; }
 
     /** Parse a typed yen amount: full/half-width digits, commas, trailing 万/億. */
@@ -1210,8 +1203,12 @@
           offset += frac * c;
         });
       }
+      // 中央の金額は円単位の正確表示で長くなるため、文字数に応じて
+      // フォントサイズを落としてドーナツ内に収める。
+      var mainLen = String(centerMain == null ? "" : centerMain).length;
+      var mainSize = mainLen <= 8 ? 17 : mainLen <= 11 ? 14.5 : mainLen <= 14 ? 12 : 10.5;
       return '<svg viewBox="0 0 180 180" width="' + size + '" height="' + size + '" role="img" aria-label="割合グラフ">' + parts +
-        '<text x="' + cx + '" y="' + (cy - 2) + '" text-anchor="middle" font-size="17" font-weight="800" fill="var(--text)" class="num">' + esc(centerMain) + "</text>" +
+        '<text x="' + cx + '" y="' + (cy - 2) + '" text-anchor="middle" font-size="' + mainSize + '" font-weight="800" fill="var(--text)" class="num">' + esc(centerMain) + "</text>" +
         '<text x="' + cx + '" y="' + (cy + 18) + '" text-anchor="middle" font-size="10.5" fill="var(--dim)">' + esc(centerSub) + "</text></svg>";
     }
     function sliceListHTML(slices) {
@@ -1229,7 +1226,7 @@
     }
     /** Multi-series line chart. series: [{label,color,dash,points:[{x,y}]}] */
     function lineChartSVG(series, xLabelEvery, yFmt, height) {
-      var W = 640, H = height || 240, padL = 74, padR = 10, padT = 12, padB = 26;
+      var W = 640, H = height || 240, padL = 118, padR = 10, padT = 12, padB = 26;
       var allX = [], allY = [];
       series.forEach(function(sr) { sr.points.forEach(function(p) { allX.push(p.x); if (Number.isFinite(p.y)) allY.push(p.y); }); });
       if (allX.length === 0 || allY.length === 0) return "";
@@ -1271,9 +1268,8 @@
     }
     function bigYenHTML(v) {
       var s = fmtYen(v);
-      var m = s.match(/^(.*?)(億円|万円|円)$/);
-      if (!m) return '<span class="num">' + esc(s) + "</span>";
-      return '<span class="num">' + esc(m[1]) + '</span><span style="font-size:0.42em;font-weight:700;margin-left:2px">' + esc(m[2]) + "</span>";
+      if (!s.endsWith("円")) return '<span class="num">' + esc(s) + "</span>";
+      return '<span class="num">' + esc(s.slice(0, -1)) + '</span><span style="font-size:0.42em;font-weight:700;margin-left:2px">円</span>';
     }
 
     // ------------------------------------------------------------------
@@ -1389,8 +1385,7 @@
       html += '<section class="card" style="padding:24px">';
       html += '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px">' +
         '<div style="min-width:0"><p style="margin:0;font-size:13px;font-weight:700;letter-spacing:0.04em;color:var(--dim)">総資産</p>' +
-        '<p style="margin:4px 0 0;font-size:48px;font-weight:800;line-height:1.05">' + bigYenHTML(total) + "</p>" +
-        '<p class="num dim" style="margin:6px 0 0;font-size:14px">' + fmtYenFull(total) + "</p></div>" +
+        '<p style="margin:4px 0 0;font-size:clamp(32px,8.6vw,48px);font-weight:800;line-height:1.15;overflow-wrap:anywhere">' + bigYenHTML(total) + "</p></div>" +
         '<span class="count-badge num">' + holdings.length + "件</span></div>";
       if (delta !== null && latest) {
         var dstr = new Date(latest.recordedAt).toLocaleDateString("ja-JP");
@@ -1432,7 +1427,7 @@
           '<div style="flex:1 1 220px">' + sliceListHTML(mix.slices) + "</div></div>" +
           '<p class="note divider-note">割合は投資総資産（' + fmtYen(mix.investedTotal) + "＝現金クラスを除いた資産の合計）に対する比率です。" +
           (mix.excludedTotal > 0 ? "預金・MMFなどの現金クラス（" + fmtYen(mix.excludedTotal) + "）は分野に割り当てにくいため対象外にしています。国債は「債券」分野として投資総資産に含めています。" : "") +
-          "分野の内訳は各資産の推定（または資産の編集画面で設定した内訳）を金額で加重平均したものです。各資産の内訳は、合計が100%でない場合も計算時に割合按分で合計100%に正規化してから使います（未配分・超過分で全体の割合がずれることはありません）。</p></section>";
+          "分野の内訳は各資産の推定（または資産の編集画面で設定した内訳）を金額で加重平均したものです。各資産の内訳は、合計が100.0%でない場合も計算時に割合按分で合計100.0%に正規化してから使います（未配分・超過分で全体の割合がずれることはありません）。</p></section>";
       }
 
       // Currency (grouped 円建て/ドル建て/ユーロ建て/その他, yen-based)
@@ -1443,7 +1438,7 @@
 
       // AI consultation summary (copy & paste into a chat)
       html += '<section class="card"><h2>AIに相談する</h2>' +
-        '<p class="dim" style="font-size:14px;line-height:1.8;margin:0">いま登録されている資産・目標配分・FIREの条件を文章にまとめます。下のボタンでコピーして、チャットなどに貼ると、内容をもとに相談できます。コピーされるのはこの端末の中で作った要約だけで、データが自動でどこかへ送信されることはありません。</p>' +
+        '<p class="dim" style="font-size:14px;line-height:1.8;margin:0">いま登録されている資産・目標配分・FIREの条件を文章にまとめます。各資産の商品名・資産クラス・金額（円）の一覧も含みます。下のボタンでコピーして、チャットなどに貼ると、内容をもとに相談できます。コピーされるのはこの端末の中で作った要約だけで、データが自動でどこかへ送信されることはありません。</p>' +
         '<div class="btn-row"><button type="button" class="btn-primary" data-action="copy-ai-summary">AI相談用の要約をコピー</button>' +
         '<span class="small" id="aiCopyFeedback" role="status" style="align-self:center"></span></div>' +
         '<details class="summary-preview"><summary>要約の内容を確認する</summary><pre id="aiSummaryPreview">' + esc(buildAiSummaryText()) + "</pre></details>" +
@@ -1511,7 +1506,7 @@
           good.push("現金は " + fmtYen(cashVal) + "（全体の " + fmtPct(cashPct) + "）あり、手元資金として一定の厚みを保ちながら投資にも回せている。");
         }
       } else {
-        warn.push("現金クラスの資産が登録されていない（0%）。急な出費への備えが別にあるか、一度確認しておきたい。");
+        warn.push("現金クラスの資産が登録されていない（0.0%）。急な出費への備えが別にあるか、一度確認しておきたい。");
       }
 
       // --- 実質通貨の集中 ---
@@ -1560,7 +1555,7 @@
           good.push("債券・国債・現金の「守り」の資産が合計 " + fmtYen(defensiveVal) + "（全体の " + fmtPct(defensivePct) + "、うち債券・国債 " + fmtPct(bondGovPct) + "）あり、暴落時の下げ幅を和らげるクッションがある。");
         }
       } else if (pct("株式") >= 70) {
-        warn.push("債券・国債が登録されておらず（0%）、株式が " + fmtPct(pct("株式")) + " を占める攻めの配分。暴落時は総資産の下げ幅が大きくなりやすい（目安は「暴落・為替」タブで確認できる）。");
+        warn.push("債券・国債が登録されておらず（0.0%）、株式が " + fmtPct(pct("株式")) + " を占める攻めの配分。暴落時は総資産の下げ幅が大きくなりやすい（目安は「暴落・為替」タブで確認できる）。");
       }
 
       // --- 暗号資産の比率 ---
@@ -1604,7 +1599,8 @@
     // ----------------------------------------------------------------
     // AI相談用の要約テキスト
     // チャット等に貼って相談できるよう、主要な数字を文章でまとめる。
-    // 金額は円表記（フル桁＋万円併記）、割合は小数第1位まで。
+    // 金額は円単位まで正確に表示（万円への丸めなし）、割合は小数第1位まで。
+    // 資産の一覧（商品名・資産クラス・金額・割合）も1件ずつ含む。
     // ----------------------------------------------------------------
     function yenText(v) { return fmtYenFull(v); }
     function buildAiSummaryText() {
@@ -1622,6 +1618,16 @@
       L.push("");
       L.push("■ 総資産");
       L.push("総資産：" + yenText(total) + "（資産 " + holdings.length + "件）");
+      L.push("");
+      L.push("■ 資産の一覧（金額の大きい順）");
+      if (holdings.length > 0) {
+        holdings.slice().sort(function(a,b){ return b.valueJpy - a.valueJpy; }).forEach(function(h){
+          var pct = total > 0 ? h.valueJpy / total * 100 : 0;
+          L.push("・" + h.name + "／" + h.assetClass + "：" + yenText(h.valueJpy) + "（総資産の " + fmtPct(pct) + "）");
+        });
+      } else {
+        L.push("・登録されている資産はありません。");
+      }
       L.push("");
       L.push("■ 資産クラス別");
       byClass.forEach(function(s){ L.push("・" + s.name + "：" + yenText(s.value) + "（" + fmtPct(s.pct) + "）"); });
@@ -1647,7 +1653,7 @@
           .sort(function(a,b){ return Math.abs(b.diff) - Math.abs(a.diff); });
         var mainDiffs = diffs.filter(function(d){ return Math.abs(d.diff) >= 1; }).slice(0, 5);
         L.push("");
-        L.push("■ 目標配分との差（目標は合計100%に換算）");
+        L.push("■ 目標配分との差（目標は合計100.0%に換算）");
         if (mainDiffs.length > 0) {
           mainDiffs.forEach(function(d){ L.push("・" + d.name + "：目標 " + fmtPct(d.target) + "／現在 " + fmtPct(d.current) + "／差 " + signedPoint(d.diff)); });
         } else {
@@ -1671,7 +1677,7 @@
       // 税金・年金の前提（要点のみ）
       var tax = fireTaxParams(f), pen = firePensionParams(f);
       if (f.taxEnabled) {
-        L.push("・税金・社会保険料：考慮する。取り崩し課税は「取り崩し額×非NISA割合" + fmtPct(tax.nonNisaPct) + "×利益部分の割合" + fmtPct(tax.gainSharePct) + "×税率" + fmtPct(tax.withdrawalTaxPct, 3) + "」（実効の目減り約" + fmtPct(tax.dragRate * 100, 2) + "、NISA分は非課税）。パート収入の実効負担率 " + fmtPct(tax.sideBurdenRatePct) + "、退職後の公的負担は年 " + yenText(tax.burden) + " を支出に上乗せ。");
+        L.push("・税金・社会保険料：考慮する。取り崩し課税は「取り崩し額×非NISA割合" + fmtPct(tax.nonNisaPct) + "×利益部分の割合" + fmtPct(tax.gainSharePct) + "×税率" + fmtPct(tax.withdrawalTaxPct, 3) + "」（実効の目減り約" + fmtPct(tax.dragRate * 100) + "、NISA分は非課税）。パート収入の実効負担率 " + fmtPct(tax.sideBurdenRatePct) + "、退職後の公的負担は年 " + yenText(tax.burden) + " を支出に上乗せ。");
       } else {
         L.push("・税金・社会保険料：考慮しない設定。");
       }
@@ -1769,7 +1775,7 @@
       var fs = formState;
       var mixRows = Object.keys(fs.mix).filter(function(k){ return fs.mix[k] > 0; }).map(function(sec) {
         return '<div class="mix-row"><span class="mix-name"><span class="dot" style="background:' + colorFor(sec, FIELD_SECTORS.indexOf(sec)) + '"></span>' + esc(sec) + "</span>" +
-          '<span class="mix-input-wrap"><input class="mix-input num" type="text" inputmode="decimal" data-mix="' + esc(sec) + '" value="' + Math.round(fs.mix[sec] * 10) / 10 + '" aria-label="' + esc(sec) + 'の割合"><span class="target-unit">%</span></span>' +
+          '<span class="mix-input-wrap"><input class="mix-input num" type="text" inputmode="decimal" data-mix="' + esc(sec) + '" value="' + (Math.round(fs.mix[sec] * 10) / 10).toFixed(1) + '" aria-label="' + esc(sec) + 'の割合"><span class="target-unit">%</span></span>' +
           '<button type="button" class="mix-remove" data-mix-remove="' + esc(sec) + '">外す</button></div>';
       }).join("");
       var addable = FIELD_SECTORS.filter(function(s){ return !(fs.mix[s] > 0); });
@@ -1777,10 +1783,10 @@
       var mixSumR = Math.round(mixSum * 10) / 10;
       var mixOff = Math.abs(mixSumR - 100) > 0.05;
       return '<div id="mixRows">' + mixRows + "</div>" +
-        '<p class="note" style="margin:8px 0" id="mixSumLine">内訳の合計：<b class="num" id="mixSumVal">' + mixSumR + '%</b>' +
-          (mixOff ? ' <span style="color:var(--danger);font-weight:700">（100%になっていません。計算では割合按分で正規化されますが、そのままだと意図とずれることがあります）</span>' : ' <span style="color:var(--green);font-weight:700">（100%です）</span>') + "</p>" +
-        (mixOff ? '<p style="margin:0 0 8px"><button type="button" class="btn-ghost" data-mix-normalize>100%に自動調整（割合按分）</button></p>' : "") +
-        '<p class="note" style="margin:8px 0">商品名からの推定値です（推定値は合計100%にそろえてあります）。直接書き換えると、その内訳が優先されます。</p>' +
+        '<p class="note" style="margin:8px 0" id="mixSumLine">内訳の合計：<b class="num" id="mixSumVal">' + mixSumR.toFixed(1) + '%</b>' +
+          (mixOff ? ' <span style="color:var(--danger);font-weight:700">（100.0%になっていません。計算では割合按分で正規化されますが、そのままだと意図とずれることがあります）</span>' : ' <span style="color:var(--green);font-weight:700">（100.0%です）</span>') + "</p>" +
+        (mixOff ? '<p style="margin:0 0 8px"><button type="button" class="btn-ghost" data-mix-normalize>100.0%に自動調整（割合按分）</button></p>' : "") +
+        '<p class="note" style="margin:8px 0">商品名からの推定値です（推定値は合計100.0%にそろえてあります）。直接書き換えると、その内訳が優先されます。</p>' +
         (addable.length ? '<p class="small dim" style="margin:0 0 6px">分野を追加：</p><div class="chips">' +
           addable.map(function(s){ return '<button type="button" class="chip" data-mix-add="' + esc(s) + '">' + esc(s) + "</button>"; }).join("") + "</div>" : "");
     }
@@ -1790,12 +1796,12 @@
       var fs = formState;
       var rows = EXPOSURE_CURRENCIES.filter(function(k){ return fs.curMix[k] > 0; }).map(function(cur) {
         return '<div class="mix-row"><span class="mix-name"><span class="dot" style="background:' + CUR_COLORS[cur] + '"></span>' + esc(CUR_LABELS[cur]) + "</span>" +
-          '<span class="mix-input-wrap"><input class="mix-input num" type="text" inputmode="decimal" data-curmix="' + esc(cur) + '" value="' + Math.round(fs.curMix[cur] * 10) / 10 + '" aria-label="' + esc(CUR_LABELS[cur]) + 'の割合"><span class="target-unit">%</span></span>' +
+          '<span class="mix-input-wrap"><input class="mix-input num" type="text" inputmode="decimal" data-curmix="' + esc(cur) + '" value="' + (Math.round(fs.curMix[cur] * 10) / 10).toFixed(1) + '" aria-label="' + esc(CUR_LABELS[cur]) + 'の割合"><span class="target-unit">%</span></span>' +
           '<button type="button" class="mix-remove" data-curmix-remove="' + esc(cur) + '">外す</button></div>';
       }).join("");
       var addable = EXPOSURE_CURRENCIES.filter(function(s){ return !(fs.curMix[s] > 0); });
       return '<div id="curMixRows">' + rows + "</div>" +
-        '<p class="note" style="margin:8px 0">商品名からの推定値（実質的な通貨エクスポージャーの目安）です。合計が100%にならなくても、保存時に比率へ換算します。直接書き換えると、その内訳が優先され、概要の通貨別割合と為替シミュレーションに使われます。</p>' +
+        '<p class="note" style="margin:8px 0">商品名からの推定値（実質的な通貨エクスポージャーの目安）です。合計が100.0%にならなくても、保存時に比率へ換算します。直接書き換えると、その内訳が優先され、概要の通貨別割合と為替シミュレーションに使われます。</p>' +
         (addable.length ? '<p class="small dim" style="margin:0 0 6px">通貨を追加：</p><div class="chips">' +
           addable.map(function(s){ return '<button type="button" class="chip" data-curmix-add="' + esc(s) + '">' + esc(CUR_LABELS[s]) + "</button>"; }).join("") + "</div>" : "");
     }
@@ -1843,29 +1849,29 @@
           // 表示上の合計が100%になるようにする。
           var mixKeys = Object.keys(mix).sort(function(a,b){ return mix[b] - mix[a]; });
           var topKeys = mixKeys.slice(0, 3);
-          var topVals = topKeys.map(function(k){ return Math.round(mix[k]); });
+          var topVals = topKeys.map(function(k){ return Math.round(mix[k] * 10) / 10; });
           var topMix;
           if (mixKeys.length > topKeys.length) {
-            var restPct = 100 - topVals.reduce(function(s,v){ return s + v; }, 0);
-            topMix = topKeys.map(function(k, i){ return k + " " + topVals[i] + "%"; }).join("・") +
-              (restPct > 0 ? "・ほか " + restPct + "%" : "");
+            var restPct = Math.round((100 - topVals.reduce(function(s,v){ return s + v; }, 0)) * 10) / 10;
+            topMix = topKeys.map(function(k, i){ return k + " " + topVals[i].toFixed(1) + "%"; }).join("・") +
+              (restPct > 0 ? "・ほか " + restPct.toFixed(1) + "%" : "");
           } else {
             if (topVals.length > 0) {
-              var mixSumR = topVals.reduce(function(s,v){ return s + v; }, 0);
-              if (mixSumR !== 100) topVals[0] += 100 - mixSumR;
+              var mixSumR = Math.round(topVals.reduce(function(s,v){ return s + v; }, 0) * 10) / 10;
+              if (mixSumR !== 100) topVals[0] = Math.round((topVals[0] + 100 - mixSumR) * 10) / 10;
             }
-            topMix = topKeys.map(function(k, i){ return k + " " + topVals[i] + "%"; }).join("・");
+            topMix = topKeys.map(function(k, i){ return k + " " + topVals[i].toFixed(1) + "%"; }).join("・");
           }
           var confirmDel = formState && formState.deleteId === h.id;
           var exp = effectiveCurrencyExposure(h);
-          // 通貨は区分が4つしかないので切り捨てず全件出す（合計100%）。
+          // 通貨は区分が4つしかないので切り捨てず全件出す（合計100.0%）。
           var expKeys = EXPOSURE_CURRENCIES.filter(function(k){ return exp[k] > 0; }).sort(function(a,b){ return exp[b] - exp[a]; });
-          var expVals = expKeys.map(function(k){ return Math.round(exp[k]); });
+          var expVals = expKeys.map(function(k){ return Math.round(exp[k] * 10) / 10; });
           if (expVals.length > 0) {
-            var expSumR = expVals.reduce(function(s,v){ return s + v; }, 0);
-            if (expSumR !== 100) expVals[0] += 100 - expSumR;
+            var expSumR = Math.round(expVals.reduce(function(s,v){ return s + v; }, 0) * 10) / 10;
+            if (expSumR !== 100) expVals[0] = Math.round((expVals[0] + 100 - expSumR) * 10) / 10;
           }
-          var topExp = expKeys.map(function(k, i){ return k + " " + expVals[i] + "%"; }).join("・");
+          var topExp = expKeys.map(function(k, i){ return k + " " + expVals[i].toFixed(1) + "%"; }).join("・");
           return "<li>" +
             '<div class="asset-top"><span class="asset-name">' + esc(h.name) + '</span>' +
               '<span class="asset-value num">' + fmtYen(h.valueJpy) + "</span></div>" +
@@ -1884,7 +1890,7 @@
             "</div></li>";
         }).join("") + "</ul>" +
         '<p class="num" style="margin:14px 0 0;font-size:14px">合計 <b style="font-size:17px">' + fmtYenFull(totalOf(holdings)) + "</b>（" + holdings.length + "件）</p>" +
-        '<p class="note" style="margin:8px 0 0">各資産の「内訳」は、分野の上位3つと、それ以外をまとめた「ほか」を合わせた表示です（合計100%）。全分野の内訳は「編集」で確認できます。</p>';
+        '<p class="note" style="margin:8px 0 0">各資産の「内訳」は、分野の上位3つと、それ以外をまとめた「ほか」を合わせた表示です（合計100.0%）。全分野の内訳は「編集」で確認できます。</p>';
       }
       html += "</section>";
       html += targetsHTML();
@@ -1911,7 +1917,7 @@
     function targetSumInner() {
       var sum = ASSET_CLASSES.reduce(function(s,c){ return s + (Number(state.targets[c]) || 0); }, 0);
       return "目標の合計：<b>" + fmtPct(sum) + "</b>" +
-        (Math.abs(sum - 100) > 0.05 ? ' <span class="dim">（100%でなくても、下の提案は比率に換算して計算します）</span>' : "");
+        (Math.abs(sum - 100) > 0.05 ? ' <span class="dim">（100.0%でなくても、下の提案は比率に換算して計算します）</span>' : "");
     }
     function rebalanceHTML() {
       var holdings = state.assets;
@@ -1927,7 +1933,7 @@
         return { name: c, idx: i, diff: diff };
       }).filter(function(r){ return Math.abs(r.diff) >= 10000; })
         .sort(function(a,b){ return Math.abs(b.diff) - Math.abs(a.diff); });
-      if (rows.length === 0) return '<p style="font-size:14px;margin:10px 0 0">現在の配分は目標にほぼ沿っています（差が1万円未満のクラスだけです）。</p>';
+      if (rows.length === 0) return '<p style="font-size:14px;margin:10px 0 0">現在の配分は目標にほぼ沿っています（差が10,000円未満のクラスだけです）。</p>';
       return '<ul class="slice-list" style="margin-top:8px">' + rows.map(function(r) {
         var buy = r.diff > 0;
         return "<li><div class=\"slice-head\">" +
@@ -1996,13 +2002,13 @@
       });
       var sumR = Math.round(sum * 10) / 10;
       var valEl = document.getElementById("mixSumVal");
-      if (valEl) valEl.textContent = sumR + "%";
+      if (valEl) valEl.textContent = sumR.toFixed(1) + "%";
       var line = document.getElementById("mixSumLine");
       if (line) {
         var off = Math.abs(sumR - 100) > 0.05;
-        line.innerHTML = "内訳の合計：<b class=\"num\" id=\"mixSumVal\">" + sumR + "%</b>" +
-          (off ? ' <span style="color:var(--danger);font-weight:700">（100%になっていません。計算では割合按分で正規化されますが、そのままだと意図とずれることがあります）</span>'
-               : ' <span style="color:var(--green);font-weight:700">（100%です）</span>');
+        line.innerHTML = "内訳の合計：<b class=\"num\" id=\"mixSumVal\">" + sumR.toFixed(1) + "%</b>" +
+          (off ? ' <span style="color:var(--danger);font-weight:700">（100.0%になっていません。計算では割合按分で正規化されますが、そのままだと意図とずれることがあります）</span>'
+               : ' <span style="color:var(--green);font-weight:700">（100.0%です）</span>');
       }
     }
     function bindMix() {
@@ -2290,7 +2296,7 @@
       // --- 公的年金 ---
       var pen = firePensionParams(f);
       html += '<section class="card"><h2>公的年金</h2>' +
-        '<p class="note" style="margin:0 0 12px">受給開始年齢以降、年間支出から年金収入を差し引いた分だけを取り崩す計算にします。年金額は手取り想定で入力してください（年金自体の税金は別途計算しません）。正確な見込み額は、ねんきん定期便や「ねんきんネット」で確認してください。初期値の年額130万円は、年収550万円程度で40歳ごろまで厚生年金に加入した場合のごく粗い目安です（加入開始年齢や、その後も国民年金保険料を払い続けるかどうかで大きく変わります）。</p>' +
+        '<p class="note" style="margin:0 0 12px">受給開始年齢以降、年間支出から年金収入を差し引いた分だけを取り崩す計算にします。年金額は手取り想定で入力してください（年金自体の税金は別途計算しません）。正確な見込み額は、ねんきん定期便や「ねんきんネット」で確認してください。初期値の年額1,300,000円は、年収5,500,000円程度で40歳ごろまで厚生年金に加入した場合のごく粗い目安です（加入開始年齢や、その後も国民年金保険料を払い続けるかどうかで大きく変わります）。</p>' +
         '<label class="switch-row"><input type="checkbox" data-fire-pension ' + (f.pensionEnabled ? "checked" : "") + "> 年金収入を考慮する</label>";
       if (f.pensionEnabled) {
         html += '<div style="margin-top:10px">' +
@@ -2355,7 +2361,7 @@
           (tax.sideGross > 0
             ? '<li>パート収入：額面 ' + fmtYen(tax.sideGross) + " → 手取り " + fmtYen(tax.sideNet) + "（実効負担率 " + fmtPct(tax.sideBurdenRatePct) + "、年 " + fmtYen(tax.sideGross - tax.sideNet) + " の負担）</li>"
             : '<li>パート収入：入力がないため、手取り換算の影響はありません</li>') +
-          '<li>取り崩し課税：実効の目減り ' + fmtPct(tax.dragRate * 100, 2) + "（非NISA分 " + fmtPct(tax.nonNisaPct) + " × 利益部分 " + fmtPct(tax.gainSharePct) + " × 税率 " + fmtPct(tax.withdrawalTaxPct, 3) + "、NISA分 " + fmtPct(tax.nisaPct) + " は非課税）。取り崩し100万円あたりの手取りは約 " + fmtYen(1000000 * tax.netFactor) + " です</li>" +
+          '<li>取り崩し課税：実効の目減り ' + fmtPct(tax.dragRate * 100) + "（非NISA分 " + fmtPct(tax.nonNisaPct) + " × 利益部分 " + fmtPct(tax.gainSharePct) + " × 税率 " + fmtPct(tax.withdrawalTaxPct, 3) + "、NISA分 " + fmtPct(tax.nisaPct) + " は非課税）。取り崩し1,000,000円あたりの手取りは " + fmtYen(1000000 * tax.netFactor) + " です</li>" +
           '<li>退職後の公的負担：年 ' + fmtYen(tax.burden) + " を取り崩し期の支出に上乗せしています</li>" +
           "</ul>" +
           '<div style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px;font-size:14px;line-height:1.9" class="num">' +
